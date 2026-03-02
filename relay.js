@@ -2,6 +2,7 @@ const WebSocket = require("ws");
 const dgram = require("dgram");
 const net = require("net");
 const crypto = require("crypto");
+const { getReverseFlow } = require("./tcp_utils");
 
 // ==============================================================================
 // CONFIGURATION
@@ -41,7 +42,7 @@ const LOG_LEVEL_TRACE = 2;
 // LOG_LEVEL_TRACE for verbose packet-level trace logging, or
 // LOG_LEVEL_DISABLED to disable all debug/trace logging.
 // ENV: LOG_LEVEL
-const log_level = process.env.LOG_LEVEL ? parseInt(process.env.LOG_LEVEL, 10) : LOG_LEVEL_TRACE;
+const log_level = process.env.LOG_LEVEL ? parseInt(process.env.LOG_LEVEL, 10) : LOG_LEVEL_DEBUG;
 
 // GATEWAY_IP: The IP address of the virtual gateway within the VM's network.
 // ENV: GATEWAY_IP
@@ -88,6 +89,12 @@ const PROXY_PORT = process.env.PROXY_PORT ? parseInt(process.env.PROXY_PORT, 10)
 // PROXY_BIND_ADDRESS: IP address for the reverse proxy to bind to.
 // ENV: PROXY_BIND_ADDRESS
 const PROXY_BIND_ADDRESS = process.env.PROXY_BIND_ADDRESS || "127.0.0.1"; // Default to binding on localhost
+
+// REVERSE_TCP_IDLE_TIMEOUT_MS: Idle timeout for reverse TCP connections in milliseconds.
+// ENV: REVERSE_TCP_IDLE_TIMEOUT_MS
+const REVERSE_TCP_IDLE_TIMEOUT_MS = process.env.REVERSE_TCP_IDLE_TIMEOUT_MS
+  ? parseInt(process.env.REVERSE_TCP_IDLE_TIMEOUT_MS, 10)
+  : 45000;
 
 // ==============================================================================
 // END OF CONFIGURATION
@@ -302,6 +309,7 @@ class VMSession {
         inFlight: [],
         sending: false,
         vmOutOfOrder: new Map(),
+        idleTimer: null,
         srcPort,
         dstPort,
         srcIP,
@@ -317,8 +325,10 @@ class VMSession {
         onError: (err) => reject(err),
       };
       this.reverseTcpConnections.set(connKey, conn);
+      this.bumpReverseConnActivity(connKey);
 
       conn.upstream.on("data", (data) => {
+        this.bumpReverseConnActivity(connKey);
         if (log_level >= LOG_LEVEL_DEBUG) {
           console.log(
             `[UPSTREAM] Received ${data.length} bytes from client. Forwarding to VM.`,
@@ -329,6 +339,7 @@ class VMSession {
       });
 
       conn.upstream.on("close", () => {
+        this.bumpReverseConnActivity(connKey);
         this.sendTCP(conn, Buffer.alloc(0), srcPort, dstPort, srcIP, dstIP, {
           fin: true,
           ack: true,
@@ -360,15 +371,13 @@ class VMSession {
     const FIN = (flags & 0x01) !== 0;
     const RST = (flags & 0x04) !== 0;
     const payload = ipPacket.slice(ihl + dataOffset);
+    const reverseFlow = getReverseFlow(srcIP, dstIP, srcPort, dstPort);
 
     if (log_level >= LOG_LEVEL_TRACE) {
       const f = [
         SYN ? "SYN" : "",
-
         ACK ? "ACK" : "",
-
         FIN ? "FIN" : "",
-
         RST ? "RST" : "",
       ].filter((x) => x).join(",");
 
@@ -388,7 +397,6 @@ class VMSession {
     const connKey = dstPort;
     const conn = this.reverseTcpConnections.get(connKey);
 
-    // At the start of handleReverseTCP, add:
     if (log_level >= LOG_LEVEL_TRACE) {
       console.log(
         `[R-TRACE-SEQ] Packet: seq=${seqNum} len=${payload.length}, Current: vmSeq=${conn?.vmSeq}, Expected next: ${
@@ -407,10 +415,18 @@ class VMSession {
         );
       }
       if (!RST) {
-        this.sendRSTForReverse(dstPort, srcPort, dstIP, srcIP, ackNum);
+        this.sendRSTForReverse(
+          reverseFlow.relaySrcPort,
+          reverseFlow.relayDstPort,
+          reverseFlow.relaySrcIP,
+          reverseFlow.relayDstIP,
+          ackNum,
+        );
       }
       return;
     }
+
+    this.bumpReverseConnActivity(connKey);
 
     if (conn.state === "SYN_SENT" && SYN && ACK) {
       let windowScale = 0;
@@ -440,7 +456,7 @@ class VMSession {
       conn.vmWindowScale = windowScale;
       conn.vmWindow = window << windowScale;
 
-      this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, dstIP, srcIP, {
+      this.sendTCP(conn, Buffer.alloc(0), reverseFlow.relaySrcPort, reverseFlow.relayDstPort, reverseFlow.relaySrcIP, reverseFlow.relayDstIP, {
         ack: true,
       });
 
@@ -482,6 +498,7 @@ class VMSession {
       }
       conn.state = "CLOSED";
       conn.downstream.end();
+      this.clearReverseConnTimer(connKey);
       this.reverseTcpConnections.delete(connKey);
       return; // Exit immediately
     }
@@ -499,7 +516,7 @@ class VMSession {
           );
         }
         // Don't update vmSeq, just ACK
-        this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, dstIP, srcIP, {
+        this.sendTCP(conn, Buffer.alloc(0), reverseFlow.relaySrcPort, reverseFlow.relayDstPort, reverseFlow.relaySrcIP, reverseFlow.relayDstIP, {
           ack: true,
         });
         return;
@@ -514,13 +531,13 @@ class VMSession {
       if (this.seqLessThan(effectiveSeq, conn.vmSeq)) {
         const alreadyHave = this.seqDiff(conn.vmSeq, effectiveSeq);
         if (alreadyHave >= effectivePayload.length) {
-          if (log_level >= LOG_LEVEL_DEBUG) {
+          if (log_level >= LOG_LEVEL_TRACE) {
             console.log(
               `[R-TRACE] Ignoring retransmitted packet: seq=${effectiveSeq} but already have up to ${conn.vmSeq}`,
             );
           }
           // Send ACK with current expected sequence number
-          this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, dstIP, srcIP, {
+          this.sendTCP(conn, Buffer.alloc(0), reverseFlow.relaySrcPort, reverseFlow.relayDstPort, reverseFlow.relaySrcIP, reverseFlow.relayDstIP, {
             ack: true,
           });
           return;
@@ -546,14 +563,14 @@ class VMSession {
         if (!conn.vmOutOfOrder.has(seqKey)) {
           conn.vmOutOfOrder.set(seqKey, effectivePayload);
         }
-        this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, dstIP, srcIP, {
+        this.sendTCP(conn, Buffer.alloc(0), reverseFlow.relaySrcPort, reverseFlow.relayDstPort, reverseFlow.relaySrcIP, reverseFlow.relayDstIP, {
           ack: true,
         });
         return;
       }
 
       // If we reach here, seqNum === conn.vmSeq (in-order data)
-      if (log_level >= LOG_LEVEL_DEBUG) {
+      if (log_level >= LOG_LEVEL_TRACE) {
         console.log(
           `[R-TRACE-DATA] Writing ${effectivePayload.length} bytes to downstream. Data (first 32 bytes): ${
             effectivePayload.toString("hex", 0, Math.min(effectivePayload.length, 32))
@@ -572,7 +589,7 @@ class VMSession {
         conn.vmSeq = (conn.vmSeq + buffered.length) >>> 0;
       }
 
-      this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, dstIP, srcIP, {
+      this.sendTCP(conn, Buffer.alloc(0), reverseFlow.relaySrcPort, reverseFlow.relayDstPort, reverseFlow.relaySrcIP, reverseFlow.relayDstIP, {
         ack: true,
       });
     }
@@ -589,16 +606,17 @@ class VMSession {
       conn.vmSeq = (conn.vmSeq + 1) >>> 0;
 
       // Send final ACK for the FIN. This uses the updated vmSeq.
-      this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, dstIP, srcIP, {
+      this.sendTCP(conn, Buffer.alloc(0), reverseFlow.relaySrcPort, reverseFlow.relayDstPort, reverseFlow.relaySrcIP, reverseFlow.relayDstIP, {
         ack: true,
       });
 
+      this.clearReverseConnTimer(connKey);
       this.reverseTcpConnections.delete(connKey);
       this.recentlyClosed.add(connKey);
 
       setTimeout(() => {
         this.recentlyClosed.delete(connKey);
-      }, 2000); // Reduced from 5000ms
+      }, 2000);
     }
   }
 
@@ -1203,6 +1221,40 @@ class VMSession {
   seqDiff(a, b) {
     const diff = (a - b) >>> 0;
     return diff > 0x7FFFFFFF ? 0 : diff;
+  }
+
+  bumpReverseConnActivity(connKey) {
+    const conn = this.reverseTcpConnections.get(connKey);
+    if (!conn) return;
+
+    if (conn.idleTimer) {
+      clearTimeout(conn.idleTimer);
+    }
+
+    conn.idleTimer = setTimeout(() => {
+      const stale = this.reverseTcpConnections.get(connKey);
+      if (!stale) return;
+      if (log_level >= LOG_LEVEL_DEBUG) {
+        console.log(`[REVERSE TCP] Idle timeout closing connection ${connKey}`);
+      }
+
+      stale.state = "CLOSED";
+      stale.downstream.end();
+      stale.upstream.destroy();
+      this.reverseTcpConnections.delete(connKey);
+      this.recentlyClosed.add(connKey);
+      setTimeout(() => {
+        this.recentlyClosed.delete(connKey);
+      }, 2000);
+    }, REVERSE_TCP_IDLE_TIMEOUT_MS);
+  }
+
+  clearReverseConnTimer(connKey) {
+    const conn = this.reverseTcpConnections.get(connKey);
+    if (conn && conn.idleTimer) {
+      clearTimeout(conn.idleTimer);
+      conn.idleTimer = null;
+    }
   }
 
   trySendReverseToVM(connKey) {
@@ -2040,6 +2092,15 @@ class VMSession {
       }
     }
     this.tcpConnections.clear();
+
+    for (const [key, conn] of this.reverseTcpConnections) {
+      if (conn.idleTimer) {
+        clearTimeout(conn.idleTimer);
+      }
+      conn.upstream.destroy();
+      conn.downstream.destroy();
+    }
+    this.reverseTcpConnections.clear();
   }
 }
 
@@ -2217,6 +2278,7 @@ async function startTcpForward(rule) {
           `[TCP PROXY] Local client disconnected from ${bindAddress}:${rule.host_port}`,
         );
         downstream.unpipe(localSocket);
+        targetSession.clearReverseConnTimer(connKey);
         targetSession.reverseTcpConnections.delete(connKey);
       });
 
@@ -2370,8 +2432,6 @@ const adminServer = http.createServer((req, res) => {
       proxyRules.push(rule);
       if (rule.type === "port") {
         startPortForward(rule);
-      } else if (rule.type === "http") {
-        // TODO: Implement startHttpProxy if needed, or handle here
       }
       res.writeHead(201);
       res.end();
@@ -2383,8 +2443,6 @@ const adminServer = http.createServer((req, res) => {
       const rule = proxyRules[index];
       if (rule.type === "port") {
         stopPortForward(rule);
-      } else if (rule.type === "http") {
-        // TODO: Implement stopHttpProxy if needed
       } else {
         // Legacy support for old tcp/udp rules
         stopTcpForward(rule.id);
@@ -2492,6 +2550,7 @@ async function proxyRequest(req, res, rule) {
       if (finished) return;
       finished = true;
       if (responseTimeout) clearTimeout(responseTimeout);
+      targetSession.clearReverseConnTimer(connKey);
       targetSession.reverseTcpConnections.delete(connKey);
       targetSession.recentlyClosed.add(connKey);
       setTimeout(() => {
@@ -2649,6 +2708,7 @@ proxyServer.on("upgrade", async (req, socket, head) => {
     const cleanup = () => {
       if (closed) return;
       closed = true;
+      targetSession.clearReverseConnTimer(connKey);
       targetSession.reverseTcpConnections.delete(connKey);
       targetSession.recentlyClosed.add(connKey);
       setTimeout(() => {

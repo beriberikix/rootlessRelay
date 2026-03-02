@@ -27,7 +27,7 @@ These default values can be overridden by setting corresponding environment vari
 | `MAX_CONNECTIONS_PER_IP` | Maximum number of concurrent WebSocket connections from a single IP.   | `4`         |
 | `ENABLE_WSS`             | Use Secure WebSockets (WSS). Requires `cert.pem` and `key.pem`.        | `true`      |
 | `ENABLE_VM_TO_VM`        | Allow VMs on the same relay to communicate with each other.            | `true`      |
-| `LOG_LEVEL`              | Controls logging verbosity. `0` (Disabled), `1` (Debug), `2` (Trace).  | `2` (Trace) |
+| `LOG_LEVEL`              | Controls logging verbosity. `0` (Disabled), `1` (Debug), `2` (Trace).  | `1` (Debug) |
 
 ### Network & Port Settings
 
