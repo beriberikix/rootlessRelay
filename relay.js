@@ -295,6 +295,17 @@ class VMSession {
         relayIsn: isn,
         relaySeq: (isn + 1) >>> 0,
         vmSeq: 0,
+        vmLastAck: (isn + 1) >>> 0,
+        vmWindow: TCP_WINDOW_SIZE,
+        vmWindowScale: 0,
+        sendQueue: [],
+        inFlight: [],
+        sending: false,
+        vmOutOfOrder: new Map(),
+        srcPort,
+        dstPort,
+        srcIP,
+        dstIP,
         upstream: new PassThrough(),
         downstream: new PassThrough(),
         onConnected: () =>
@@ -313,10 +324,8 @@ class VMSession {
             `[UPSTREAM] Received ${data.length} bytes from client. Forwarding to VM.`,
           );
         }
-        this.sendTCP(conn, data, srcPort, dstPort, srcIP, dstIP, {
-          ack: true,
-          psh: true,
-        });
+        conn.sendQueue.push(data);
+        this.trySendReverseToVM(connKey);
       });
 
       conn.upstream.on("close", () => {
@@ -345,6 +354,7 @@ class VMSession {
     const ackNum = ipPacket.readUInt32BE(ihl + 8);
     const flags = ipPacket[ihl + 13];
     const dataOffset = (ipPacket[ihl + 12] >> 4) * 4;
+    const window = ipPacket.readUInt16BE(ihl + 14);
     const SYN = (flags & 0x02) !== 0;
     const ACK = (flags & 0x10) !== 0;
     const FIN = (flags & 0x01) !== 0;
@@ -397,26 +407,72 @@ class VMSession {
         );
       }
       if (!RST) {
-        this.sendRSTForReverse(srcPort, dstPort, srcIP, dstIP, ackNum);
+        this.sendRSTForReverse(dstPort, srcPort, dstIP, srcIP, ackNum);
       }
       return;
     }
 
     if (conn.state === "SYN_SENT" && SYN && ACK) {
+      let windowScale = 0;
+      if (dataOffset > 20) {
+        let optOffset = ihl + 20;
+        const optEnd = ihl + dataOffset;
+        while (optOffset < optEnd && optOffset < ipPacket.length) {
+          const kind = ipPacket[optOffset];
+          if (kind === 0) break;
+          if (kind === 1) {
+            optOffset++;
+            continue;
+          }
+          if (optOffset + 1 >= ipPacket.length) break;
+          const len = ipPacket[optOffset + 1];
+          if (len < 2 || optOffset + len > optEnd) break;
+          if (kind === 3 && len === 3) {
+            windowScale = ipPacket[optOffset + 2];
+          }
+          optOffset += len;
+        }
+      }
+
       conn.state = "ESTABLISHED";
       conn.vmSeq = (seqNum + 1) >>> 0;
+      conn.vmLastAck = ackNum;
+      conn.vmWindowScale = windowScale;
+      conn.vmWindow = window << windowScale;
 
-      this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, srcIP, dstIP, {
+      this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, dstIP, srcIP, {
         ack: true,
       });
 
       if (conn.onConnected) {
         conn.onConnected();
       }
+      this.trySendReverseToVM(connKey);
       return;
     }
 
     if (conn.state !== "ESTABLISHED") return;
+
+    // Track peer receive window and acknowledged bytes for reverse stream writes.
+    conn.vmWindow = window << (conn.vmWindowScale || 0);
+    if (ACK) {
+      const acked = this.seqDiff(ackNum, conn.vmLastAck);
+      if (acked > 0) {
+        let remain = acked;
+        while (remain > 0 && conn.inFlight.length > 0) {
+          const seg = conn.inFlight[0];
+          if (seg.length <= remain) {
+            remain -= seg.length;
+            conn.inFlight.shift();
+          } else {
+            conn.inFlight[0] = seg.slice(remain);
+            remain = 0;
+          }
+        }
+        conn.vmLastAck = ackNum;
+        this.trySendReverseToVM(connKey);
+      }
+    }
 
     if (RST) {
       if (log_level >= LOG_LEVEL_DEBUG) {
@@ -443,7 +499,7 @@ class VMSession {
           );
         }
         // Don't update vmSeq, just ACK
-        this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, srcIP, dstIP, {
+        this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, dstIP, srcIP, {
           ack: true,
         });
         return;
@@ -451,30 +507,46 @@ class VMSession {
     }
 
     if (payload.length > 0) {
+      let effectiveSeq = seqNum >>> 0;
+      let effectivePayload = payload;
+
       // Check if this is old, already-processed data (a retransmission)
-      if (this.seqLessThan(seqNum, conn.vmSeq)) {
+      if (this.seqLessThan(effectiveSeq, conn.vmSeq)) {
+        const alreadyHave = this.seqDiff(conn.vmSeq, effectiveSeq);
+        if (alreadyHave >= effectivePayload.length) {
+          if (log_level >= LOG_LEVEL_DEBUG) {
+            console.log(
+              `[R-TRACE] Ignoring retransmitted packet: seq=${effectiveSeq} but already have up to ${conn.vmSeq}`,
+            );
+          }
+          // Send ACK with current expected sequence number
+          this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, dstIP, srcIP, {
+            ack: true,
+          });
+          return;
+        }
+        // Partial overlap: trim old bytes and keep only new tail.
+        effectivePayload = effectivePayload.slice(alreadyHave);
+        effectiveSeq = conn.vmSeq;
         if (log_level >= LOG_LEVEL_DEBUG) {
           console.log(
-            `[R-TRACE] Ignoring retransmitted packet: seq=${seqNum} but already have up to ${conn.vmSeq}`,
+            `[R-TRACE] Trimmed overlapping segment, kept ${effectivePayload.length} new bytes`,
           );
         }
-        // Send ACK with current expected sequence number
-        this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, srcIP, dstIP, {
-          ack: true,
-        });
-        return;
       }
 
       // Check if this is future data (out of order)
-      if (this.seqLessThan(conn.vmSeq, seqNum)) {
+      if (this.seqLessThan(conn.vmSeq, effectiveSeq)) {
         if (log_level >= LOG_LEVEL_DEBUG) {
           console.log(
-            `[R-TRACE] Buffering out-of-order packet: seq=${seqNum} expected=${conn.vmSeq}`,
+            `[R-TRACE] Buffering out-of-order packet: seq=${effectiveSeq} expected=${conn.vmSeq}`,
           );
         }
-        // TODO: Implement out-of-order packet buffering
-        // For now, just ACK what we have
-        this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, srcIP, dstIP, {
+        const seqKey = effectiveSeq >>> 0;
+        if (!conn.vmOutOfOrder.has(seqKey)) {
+          conn.vmOutOfOrder.set(seqKey, effectivePayload);
+        }
+        this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, dstIP, srcIP, {
           ack: true,
         });
         return;
@@ -483,16 +555,24 @@ class VMSession {
       // If we reach here, seqNum === conn.vmSeq (in-order data)
       if (log_level >= LOG_LEVEL_DEBUG) {
         console.log(
-          `[R-TRACE-DATA] Writing ${payload.length} bytes to downstream. Data (first 32 bytes): ${
-            payload.toString("hex", 0, Math.min(payload.length, 32))
+          `[R-TRACE-DATA] Writing ${effectivePayload.length} bytes to downstream. Data (first 32 bytes): ${
+            effectivePayload.toString("hex", 0, Math.min(effectivePayload.length, 32))
           }`,
         );
       }
 
-      conn.downstream.write(payload);
-      conn.vmSeq = (conn.vmSeq + payload.length) >>> 0;
+      conn.downstream.write(effectivePayload);
+      conn.vmSeq = (conn.vmSeq + effectivePayload.length) >>> 0;
 
-      this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, srcIP, dstIP, {
+      // Drain any contiguous out-of-order payload that is now in-order.
+      while (conn.vmOutOfOrder && conn.vmOutOfOrder.has(conn.vmSeq)) {
+        const buffered = conn.vmOutOfOrder.get(conn.vmSeq);
+        conn.vmOutOfOrder.delete(conn.vmSeq);
+        conn.downstream.write(buffered);
+        conn.vmSeq = (conn.vmSeq + buffered.length) >>> 0;
+      }
+
+      this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, dstIP, srcIP, {
         ack: true,
       });
     }
@@ -509,7 +589,7 @@ class VMSession {
       conn.vmSeq = (conn.vmSeq + 1) >>> 0;
 
       // Send final ACK for the FIN. This uses the updated vmSeq.
-      this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, srcIP, dstIP, {
+      this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, dstIP, srcIP, {
         ack: true,
       });
 
@@ -808,6 +888,7 @@ class VMSession {
         relayIsn: isn,
         relaySeq: (isn + 1) >>> 0,
         vmSeq: (seqNum + 1) >>> 0,
+        vmOutOfOrder: new Map(),
         vmLastAck: (isn + 1) >>> 0,
         state: "SYN_SENT",
         sendQueue: [],
@@ -990,27 +1071,46 @@ class VMSession {
     }
 
     if (payload.length > 0) {
+      let effectiveSeq = seqNum >>> 0;
+      let effectivePayload = payload;
       const expected = conn.vmSeq;
 
-      if (seqNum === expected) {
+      if (effectiveSeq === expected) {
         // Perfect - expected sequence
-        conn.vmSeq = (seqNum + payload.length) >>> 0;
-      } else if (this.seqLessThan(seqNum, expected)) {
-        // Old data - retransmission
-        if (log_level >= LOG_LEVEL_DEBUG) {
-          console.log(`   🔄 Retransmission from VM`);
+        conn.vmSeq = (effectiveSeq + effectivePayload.length) >>> 0;
+      } else if (this.seqLessThan(effectiveSeq, expected)) {
+        const alreadyHave = this.seqDiff(expected, effectiveSeq);
+        if (alreadyHave >= effectivePayload.length) {
+          // Old data - full retransmission
+          if (log_level >= LOG_LEVEL_DEBUG) {
+            console.log(`   🔄 Retransmission from VM`);
+          }
+          this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, dstIP, srcIP, {
+            ack: true,
+          });
+          return;
         }
-        this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, dstIP, srcIP, {
-          ack: true,
-        });
-        return;
+        // Partial overlap with new tail.
+        effectivePayload = effectivePayload.slice(alreadyHave);
+        effectiveSeq = expected;
+        conn.vmSeq = (effectiveSeq + effectivePayload.length) >>> 0;
+        if (log_level >= LOG_LEVEL_DEBUG) {
+          console.log(`   ✂️ Trimmed overlapping segment, forwarding ${effectivePayload.length}B new tail`);
+        }
       } else {
         // Future sequence number - out of order
         if (log_level >= LOG_LEVEL_DEBUG) {
           console.log(
-            `   ⚠ Out of order from VM (seq=${seqNum}, expected=${expected})`,
+            `   ⚠ Out of order from VM (seq=${effectiveSeq}, expected=${expected})`,
           );
         }
+        const seqKey = effectiveSeq >>> 0;
+        if (!conn.vmOutOfOrder.has(seqKey)) {
+          conn.vmOutOfOrder.set(seqKey, effectivePayload);
+        }
+        this.sendTCP(conn, Buffer.alloc(0), dstPort, srcPort, dstIP, srcIP, {
+          ack: true,
+        });
         return;
       }
 
@@ -1018,10 +1118,20 @@ class VMSession {
       if (conn.socket && conn.socket.writable) {
         if (log_level >= LOG_LEVEL_DEBUG) {
           console.log(
-            `   📤 Forwarding ${payload.length} bytes to ${dstIP}:${dstPort}`,
+            `   📤 Forwarding ${effectivePayload.length} bytes to ${dstIP}:${dstPort}`,
           );
         }
-        conn.socket.write(payload);
+        conn.socket.write(effectivePayload);
+      }
+
+      // Drain any contiguous out-of-order payload that is now in-order.
+      while (conn.vmOutOfOrder && conn.vmOutOfOrder.has(conn.vmSeq)) {
+        const buffered = conn.vmOutOfOrder.get(conn.vmSeq);
+        conn.vmOutOfOrder.delete(conn.vmSeq);
+        conn.vmSeq = (conn.vmSeq + buffered.length) >>> 0;
+        if (conn.socket && conn.socket.writable) {
+          conn.socket.write(buffered);
+        }
       }
 
       // ACK after processing
@@ -1093,6 +1203,62 @@ class VMSession {
   seqDiff(a, b) {
     const diff = (a - b) >>> 0;
     return diff > 0x7FFFFFFF ? 0 : diff;
+  }
+
+  trySendReverseToVM(connKey) {
+    const conn = this.reverseTcpConnections.get(connKey);
+    if (!conn || conn.sending || conn.state !== "ESTABLISHED") return;
+
+    conn.sending = true;
+    const MSS = 1460;
+
+    const sendNext = () => {
+      if (conn.sendQueue.length === 0) {
+        conn.sending = false;
+        return;
+      }
+
+      if (this.ws.bufferedAmount > 32768) {
+        conn.sending = false;
+        setTimeout(() => this.trySendReverseToVM(connKey), 20);
+        return;
+      }
+
+      const inFlightBytes = conn.inFlight.reduce((sum, seg) => sum + seg.length, 0);
+      const available = Math.max(0, conn.vmWindow - inFlightBytes);
+      if (available === 0) {
+        conn.sending = false;
+        return;
+      }
+
+      const data = conn.sendQueue[0];
+      const toSend = Math.min(MSS, data.length, available);
+      if (toSend <= 0) {
+        conn.sending = false;
+        return;
+      }
+
+      const chunk = data.slice(0, toSend);
+      conn.inFlight.push(chunk);
+      this.sendTCP(conn, chunk, conn.srcPort, conn.dstPort, conn.srcIP, conn.dstIP, {
+        ack: true,
+        psh: true,
+      });
+
+      if (toSend >= data.length) {
+        conn.sendQueue.shift();
+      } else {
+        conn.sendQueue[0] = data.slice(toSend);
+      }
+
+      if (conn.sendQueue.length > 0) {
+        setImmediate(sendNext);
+      } else {
+        conn.sending = false;
+      }
+    };
+
+    sendNext();
   }
 
   trySendToVM(connKey, info) {
@@ -1879,6 +2045,19 @@ class VMSession {
 
 wss.on("connection", (ws, req) => {
   const clientIP = req.socket.remoteAddress;
+  try {
+    if (ws._socket && typeof ws._socket.setNoDelay === "function") {
+      ws._socket.setNoDelay(true);
+      ws._socket.setKeepAlive(true, 30000);
+      if (log_level >= LOG_LEVEL_DEBUG) {
+        console.log(`🚀 WS transport tuned: TCP_NODELAY + keepalive for ${clientIP}`);
+      }
+    }
+  } catch (e) {
+    if (log_level >= LOG_LEVEL_DEBUG) {
+      console.log(`⚠️ Failed to tune WS transport socket: ${e.message}`);
+    }
+  }
 
   const currentConnections = connectionsPerIP.get(clientIP) || 0;
   if (currentConnections >= MAX_CONNECTIONS_PER_IP) {
@@ -2031,22 +2210,13 @@ async function startTcpForward(rule) {
 
       // Pipe data between the local client and the VM
       localSocket.pipe(upstream);
-      // downstream.pipe(localSocket); // Replaced with manual handler for debugging
-      downstream.on("data", (data) => {
-        if (log_level >= LOG_LEVEL_TRACE) {
-          console.log(
-            `[R-TRACE-PIPE] Manually writing ${data.length} bytes to localSocket.`,
-          );
-        }
-        localSocket.write(data);
-      });
+      downstream.pipe(localSocket);
 
       localSocket.on("close", () => {
         console.log(
           `[TCP PROXY] Local client disconnected from ${bindAddress}:${rule.host_port}`,
         );
-        // downstream.unpipe(localSocket); // Replaced with manual handler
-        downstream.removeAllListeners("data");
+        downstream.unpipe(localSocket);
         targetSession.reverseTcpConnections.delete(connKey);
       });
 
@@ -2288,6 +2458,10 @@ async function proxyRequest(req, res, rule) {
     } = await targetSession
       .createTCPConnection(rule.port);
     console.log(`[PROXY] TCP connection established with key ${connKey}`);
+    const clientSocket = res.socket;
+    let finished = false;
+    let receivedAny = false;
+    let responseTimeout = null;
 
     let url = req.url;
     if (rule.targetPath) {
@@ -2305,116 +2479,102 @@ async function proxyRequest(req, res, rule) {
       }
     }
     headers.push(`Host: ${rule.vm}:${rule.port}`);
-    headers.push(`Connection: close`); // Force connection close
+    headers.push(`Connection: close`);
     headers.push(""); // Empty line to end headers
     headers.push(""); // This creates \r\n\r\n when joined
 
     const requestData = headers.join("\r\n");
-    console.log(
-      `[PROXY] Sending request (${requestData.length} bytes): ${requestData}`,
-    );
-
-    // Send request and ensure it's flushed
-    console.log(`[PROXY] Writing ${requestData.length} bytes to upstream...`);
-    const sent = upstream.write(requestData);
-    console.log(`[PROXY] Write returned: ${sent}`);
-    if (!sent) {
-      console.log(`[PROXY] ⚠️ Upstream buffer full, waiting for drain...`);
-      await new Promise((resolve) => upstream.once("drain", resolve));
-      console.log(`[PROXY] ✅ Upstream drained`);
+    if (log_level >= LOG_LEVEL_DEBUG) {
+      console.log(`[PROXY] Forwarding request headers (${requestData.length} bytes)`);
     }
 
-    upstream.on("error", (err) => {
-      console.error("[PROXY] Upstream stream error:", err);
-    });
-
-    // Buffer all data before sending to response
-    const chunks = [];
-    let totalBytes = 0;
-    let responseTimeout = setTimeout(() => {
-      console.log(`[PROXY] ⏰ Response timeout - no data received in 10s`);
-      // Clean up the reverse TCP connection
-      console.log(`[PROXY] 🧹  Cleaning up timed-out connection ${connKey}`);
+    const cleanup = () => {
+      if (finished) return;
+      finished = true;
+      if (responseTimeout) clearTimeout(responseTimeout);
       targetSession.reverseTcpConnections.delete(connKey);
       targetSession.recentlyClosed.add(connKey);
       setTimeout(() => {
         targetSession.recentlyClosed.delete(connKey);
       }, 5000);
-
-      if (!res.headersSent) {
-        res.writeHead(504, {
-          "Content-Type": "text/plain",
-        });
-        res.end("Gateway Timeout");
-      }
       upstream.destroy();
       downstream.destroy();
-    }, 10000);
+    };
 
-    downstream.on("data", (chunk) => {
-      console.log(`[PROXY] Received ${chunk.length} bytes from downstream`);
-      clearTimeout(responseTimeout);
-      totalBytes += chunk.length;
-      chunks.push(chunk);
-    });
-
-    downstream.on("end", () => {
-      clearTimeout(responseTimeout);
-      console.log(
-        `[PROXY] Downstream ended, total ${totalBytes} bytes received`,
-      );
-      if (chunks.length > 0) {
-        const fullResponse = Buffer.concat(chunks);
-        console.log(`[PROXY] Sending response (${fullResponse.length} bytes)`);
-        if (log_level >= LOG_LEVEL_DEBUG) {
-          console.log(
-            `[PROXY] First 400 bytes (hex): ${
-              fullResponse.slice(0, 400).toString("hex")
-            }`,
-          );
+    const resetTimeout = () => {
+      if (responseTimeout) clearTimeout(responseTimeout);
+      responseTimeout = setTimeout(() => {
+        console.log(`[PROXY] ⏰ Response timeout on ${connKey}`);
+        if (!receivedAny && !res.headersSent) {
+          res.writeHead(504, { "Content-Type": "text/plain" });
+          res.end("Gateway Timeout");
+        } else if (clientSocket && !clientSocket.destroyed) {
+          clientSocket.end();
         }
+        cleanup();
+      }, 10000);
+    };
 
-        // Send raw response - the browser will parse HTTP headers
-        res.socket.write(fullResponse);
-        res.socket.end();
-      } else {
-        console.log(`[PROXY] ⚠️ No data received from VM!`);
-        res.writeHead(502, {
-          "Content-Type": "text/plain",
-        });
-        res.end("Bad Gateway: No response from VM");
-      }
+    resetTimeout();
+
+    const sent = upstream.write(requestData);
+    if (!sent) {
+      await new Promise((resolve) => upstream.once("drain", resolve));
+    }
+    req.pipe(upstream);
+
+    req.on("aborted", () => {
+      console.log(`[PROXY] Client aborted request`);
+      cleanup();
     });
 
-    req.on("close", () => {
-      console.log(`[PROXY] Client request closed`);
-      targetSession.reverseTcpConnections.delete(connKey);
-      targetSession.recentlyClosed.add(connKey);
-      setTimeout(() => {
-        targetSession.recentlyClosed.delete(connKey);
-      }, 5000);
-      upstream.destroy();
-      downstream.destroy();
+    res.on("close", () => {
+      if (!finished) {
+        cleanup();
+      }
     });
 
     upstream.on("error", (err) => {
       console.error("[PROXY] Upstream error:", err);
-      if (!res.headersSent) {
+      if (!finished && !res.headersSent) {
         res.writeHead(502, {
           "Content-Type": "text/plain",
         });
         res.end("Bad Gateway");
       }
+      cleanup();
+    });
+
+    downstream.on("data", (chunk) => {
+      receivedAny = true;
+      resetTimeout();
+      if (clientSocket && !clientSocket.destroyed) {
+        clientSocket.write(chunk);
+      }
+    });
+
+    downstream.on("end", () => {
+      if (responseTimeout) clearTimeout(responseTimeout);
+      if (!receivedAny && !res.headersSent) {
+        res.writeHead(502, {
+          "Content-Type": "text/plain",
+        });
+        res.end("Bad Gateway: No response from VM");
+      } else if (clientSocket && !clientSocket.destroyed) {
+        clientSocket.end();
+      }
+      cleanup();
     });
 
     downstream.on("error", (err) => {
       console.error("[PROXY] Downstream error:", err);
-      if (!res.headersSent) {
+      if (!finished && !res.headersSent) {
         res.writeHead(502, {
           "Content-Type": "text/plain",
         });
         res.end("Bad Gateway");
       }
+      cleanup();
     });
   } catch (err) {
     console.error("[PROXY] Error creating TCP connection:", err);
@@ -2434,6 +2594,80 @@ const proxyServer = http.createServer((req, res) => {
       "Content-Type": "text/plain",
     });
     res.end("No proxy rule found.");
+  }
+});
+
+proxyServer.on("upgrade", async (req, socket, head) => {
+  const rule = findProxyRule(req);
+  if (!rule) {
+    socket.end("HTTP/1.1 404 Not Found\r\n\r\n");
+    return;
+  }
+
+  const targetSession = ipToSession.get(rule.vm);
+  if (!targetSession) {
+    socket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+    return;
+  }
+
+  try {
+    const {
+      upstream,
+      downstream,
+      connKey,
+    } = await targetSession.createTCPConnection(rule.port);
+
+    let url = req.url;
+    if (rule.targetPath) {
+      const remainingPath = req.url.substring(rule.path.length);
+      url = path.join(rule.targetPath, remainingPath);
+    }
+
+    const headers = [`${req.method} ${url} HTTP/${req.httpVersion}`];
+    for (let i = 0; i < req.rawHeaders.length; i += 2) {
+      if (req.rawHeaders[i].toLowerCase() !== "host") {
+        headers.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
+      }
+    }
+    headers.push(`Host: ${rule.vm}:${rule.port}`);
+    headers.push("");
+    headers.push("");
+
+    const requestData = headers.join("\r\n");
+    const sent = upstream.write(requestData);
+    if (!sent) {
+      await new Promise((resolve) => upstream.once("drain", resolve));
+    }
+    if (head && head.length > 0) {
+      upstream.write(head);
+    }
+
+    socket.pipe(upstream);
+    downstream.pipe(socket);
+
+    let closed = false;
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      targetSession.reverseTcpConnections.delete(connKey);
+      targetSession.recentlyClosed.add(connKey);
+      setTimeout(() => {
+        targetSession.recentlyClosed.delete(connKey);
+      }, 5000);
+      upstream.destroy();
+      downstream.destroy();
+      socket.destroy();
+    };
+
+    socket.on("close", cleanup);
+    socket.on("error", cleanup);
+    upstream.on("error", cleanup);
+    downstream.on("error", cleanup);
+  } catch (err) {
+    console.error("[PROXY] Upgrade error:", err);
+    if (!socket.destroyed) {
+      socket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+    }
   }
 });
 
