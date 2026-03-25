@@ -311,11 +311,80 @@
       min-width: 400px; /* Minimum width for the table */
       background-color: var(--ctp-crust);
     }
+
+    .top-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .auth-overlay {
+      position: fixed;
+      inset: 0;
+      background-color: rgba(17, 17, 27, 0.92);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 2000;
+    }
+
+    .auth-card {
+      width: 100%;
+      max-width: 360px;
+      padding: 24px;
+      border: 1px solid var(--ctp-surface1);
+      border-radius: 10px;
+      background-color: var(--ctp-mantle);
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+    }
+
+    .auth-card h2 {
+      margin-top: 0;
+      margin-bottom: 14px;
+    }
+
+    .auth-error {
+      margin-top: 10px;
+      color: var(--ctp-red);
+      min-height: 1.2em;
+    }
+
+    .admin-shell {
+      opacity: 0.45;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+    }
+
+    .admin-shell.authenticated {
+      opacity: 1;
+      pointer-events: auto;
+    }
   </style>
 </head>
 
 <body>
-  <h1>rootlessRelay Admin</h1>
+  <div id="auth-overlay" class="auth-overlay">
+    <form id="login-form" class="auth-card">
+      <h2>Admin Sign In</h2>
+      <div class="form-group">
+        <label for="login-username">Username</label>
+        <input id="login-username" class="catppuccin-input" type="text" autocomplete="username" required>
+      </div>
+      <div class="form-group">
+        <label for="login-password">Password</label>
+        <input id="login-password" class="catppuccin-input" type="password" autocomplete="current-password" required>
+      </div>
+      <button type="submit" class="catppuccin-button">Sign In</button>
+      <div id="auth-error" class="auth-error"></div>
+    </form>
+  </div>
+
+  <div id="admin-shell" class="admin-shell">
+  <div class="top-actions">
+    <h1>rootlessRelay Admin</h1>
+    <button id="logout-button" type="button" class="catppuccin-button">Logout</button>
+  </div>
   <h2>Connected Clients</h2>
   <table id="sessions">
     <thead>
@@ -414,12 +483,105 @@
     <button type="button" onclick="addHttpPortForward()">Add HTTP (8888 -> VM:80)</button>
   </div>
   </div>
+  </div>
 
   <div id="toaster-notification" class="toaster-notification"></div>
 
   <script>
+    const PROXY_PORT = 8080;
+    let sessionPollIntervalId = null;
+
+    const authOverlay = document.getElementById('auth-overlay');
+    const adminShell = document.getElementById('admin-shell');
+    const loginForm = document.getElementById('login-form');
+    const authError = document.getElementById('auth-error');
+    const logoutButton = document.getElementById('logout-button');
+
+    function setAuthenticatedState(isAuthenticated) {
+      if (isAuthenticated) {
+        authOverlay.style.display = 'none';
+        adminShell.classList.add('authenticated');
+      } else {
+        authOverlay.style.display = 'flex';
+        adminShell.classList.remove('authenticated');
+        document.querySelector('#sessions tbody').innerHTML = '';
+        document.querySelector('#rules tbody').innerHTML = '';
+        if (sessionPollIntervalId) {
+          clearInterval(sessionPollIntervalId);
+          sessionPollIntervalId = null;
+        }
+      }
+    }
+
+    async function apiFetch(url, options = {}) {
+      const response = await fetch(url, options);
+      if (response.status === 401) {
+        setAuthenticatedState(false);
+        throw new Error('Unauthorized');
+      }
+      return response;
+    }
+
+    async function checkAuthStatus() {
+      try {
+        const response = await fetch('/api/auth/status');
+        const status = await response.json();
+        return Boolean(status.authenticated);
+      } catch (err) {
+        return false;
+      }
+    }
+
+    function startPolling() {
+      if (!sessionPollIntervalId) {
+        sessionPollIntervalId = setInterval(() => {
+          fetchSessions().catch(() => {});
+        }, 5000);
+      }
+      fetchSessions().catch(() => {});
+      loadRules().catch(() => {});
+    }
+
+    loginForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      authError.textContent = '';
+
+      const username = document.getElementById('login-username').value.trim();
+      const password = document.getElementById('login-password').value;
+
+      try {
+        const response = await fetch('/api/login', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({username, password}),
+        });
+
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({error: 'Login failed'}));
+          authError.textContent = payload.error || 'Login failed';
+          return;
+        }
+
+        loginForm.reset();
+        setAuthenticatedState(true);
+        startPolling();
+      } catch (err) {
+        authError.textContent = 'Login request failed';
+      }
+    });
+
+    logoutButton.addEventListener('click', async () => {
+      try {
+        await fetch('/api/logout', {
+          method: 'POST',
+        });
+      } finally {
+        setAuthenticatedState(false);
+      }
+    });
+
     async function fetchSessions() {
-      const response = await fetch('/api/sessions');
+      const response = await apiFetch('/api/sessions');
       const sessions = await response.json();
       const tbody = document.querySelector('#sessions tbody');
       const vmDropdownHttp = document.getElementById('vm');
@@ -472,9 +634,6 @@
       vmDropdownHttp.value = selectedVmHttp;
       vmDropdownPort.value = selectedVmPort;
     }
-    fetchSessions();
-    setInterval(fetchSessions, 5000);
-
     const httpFields = document.getElementById('http-fields');
     const portFields = document.getElementById('port-fields');
     const tabButtons = document.querySelectorAll('.tab-button');
@@ -534,7 +693,7 @@
         const hostPort = parseInt(document.getElementById('host_port').value);
 
         // Fetch existing rules to check for duplicates
-        const existingRulesResponse = await fetch('/api/rules');
+        const existingRulesResponse = await apiFetch('/api/rules');
         const existingRules = await existingRulesResponse.json();
 
         const isDuplicatePort = existingRules.some(rule =>
@@ -565,7 +724,7 @@
         };
       }
 
-      await fetch('/api/rules', {
+      await apiFetch('/api/rules', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(rule),
@@ -593,7 +752,7 @@
     }
 
     async function loadRules() {
-      const response = await fetch('/api/rules');
+      const response = await apiFetch('/api/rules');
       const rules = await response.json();
       const tbody = document.querySelector('#rules tbody');
       tbody.innerHTML = '';
@@ -651,20 +810,20 @@
     }
 
     async function deleteRule(id) {
-      await fetch(`/api/rules/${id}`, {method: 'DELETE'});
+      await apiFetch(`/api/rules/${id}`, {method: 'DELETE'});
       loadRules();
     }
 
     async function setNickname(sessionId, nickname) {
       if (nickname) { // Only send if nickname is not empty
-        await fetch(`/api/sessions/${sessionId}/nickname`, {
+        await apiFetch(`/api/sessions/${sessionId}/nickname`, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({nickname}),
         });
       } else {
         // If nickname is empty, delete it
-        await fetch(`/api/sessions/${sessionId}/nickname`, {
+        await apiFetch(`/api/sessions/${sessionId}/nickname`, {
           method: 'DELETE',
         });
       }
@@ -730,9 +889,13 @@
       document.getElementById('add-rule-form').dispatchEvent(new Event('submit'));
     }
 
-    loadRules();
-
-    const PROXY_PORT = 8080;
+    (async () => {
+      const authenticated = await checkAuthStatus();
+      setAuthenticatedState(authenticated);
+      if (authenticated) {
+        startPolling();
+      }
+    })();
   </script>
 </body>
 

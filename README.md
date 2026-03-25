@@ -45,6 +45,19 @@ These default values can be overridden by setting corresponding environment vari
 | `PROXY_PORT`         | Port for the HTTP reverse proxy server.                    | `8080`                     |
 | `PROXY_BIND_ADDRESS` | IP address for the reverse proxy to bind to.               | `127.0.0.1`                |
 
+### Admin Authentication Settings
+
+| Setting                    | Purpose                                                                 | Default                     |
+| -------------------------- | ----------------------------------------------------------------------- | --------------------------- |
+| `ADMIN_SESSION_SECRET`     | Secret used to sign admin session cookies. Set this in production.      | `change-me-in-production`   |
+| `ADMIN_AUTH_DB_PATH`       | Path to the SQLite database used for admin users.                       | `./admin_auth.sqlite`       |
+| `ADMIN_BOOTSTRAP_USERNAME` | Initial admin username (required on first run if DB is empty).          | none                        |
+| `ADMIN_BOOTSTRAP_PASSWORD` | Initial admin password (required on first run if DB is empty).          | none                        |
+| `ADMIN_LOGIN_WINDOW_MS`    | Sliding window for failed login attempts.                               | `600000` (10 minutes)       |
+| `ADMIN_LOGIN_MAX_ATTEMPTS` | Max failed attempts per IP+username within the login window.            | `6`                         |
+| `ADMIN_TRUST_PROXY`        | Trust reverse proxy headers for IP/session security settings.            | `false`                     |
+| `ADMIN_COOKIE_SECURE`      | Force secure admin session cookies (requires HTTPS at edge/proxy).      | `false`                     |
+
 ## How to use
 
 ### 1. Installation
@@ -84,6 +97,17 @@ npm start
 
 ```
 
+For first startup with an empty admin auth database, provide bootstrap credentials:
+
+```bash
+ADMIN_SESSION_SECRET="replace-with-strong-secret" \
+ADMIN_BOOTSTRAP_USERNAME="admin" \
+ADMIN_BOOTSTRAP_PASSWORD="replace-with-strong-password" \
+npm start
+```
+
+Once the first user is created, you can remove bootstrap username/password env vars.
+
 | In the browser you will use the relay first visit <https://127.0.0.1:8443> and
 | trust the certificate you created.
 
@@ -91,4 +115,13 @@ The server will start, and you can see log output in your console.
 
 ### 4. Admin UI
 
-The project includes a simple web-based admin UI. By default, it's available at `http://localhost:8001`.
+The project includes a web-based admin UI. By default, it's available at `http://localhost:8001`.
+
+The admin API now requires login. Open the admin UI and sign in using your configured admin credentials.
+
+For public deployments behind HTTPS, set:
+
+```bash
+ADMIN_TRUST_PROXY=true
+ADMIN_COOKIE_SECURE=true
+```

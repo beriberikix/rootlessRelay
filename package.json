@@ -29,6 +29,12 @@
   },
   "homepage": "https://github.com/obegron/rootlessRelay#readme",
   "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^4.21.2",
+    "express-session": "^1.18.1",
+    "passport": "^0.7.0",
+    "passport-local": "^1.0.0",
+    "sqlite3": "^5.1.7",
     "ws": "^8.17.0"
   }
 }
