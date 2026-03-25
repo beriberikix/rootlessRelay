@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  relay:
+    build: .
+    ports:
+      - "8086:8086"
+      - "8001:8001"
+      - "8080:8080"
+      - "8443:8443"
+    environment:
+      - ADMIN_SESSION_SECRET=${ADMIN_SESSION_SECRET}
+      - ADMIN_BOOTSTRAP_USERNAME=${ADMIN_BOOTSTRAP_USERNAME}
+      - ADMIN_BOOTSTRAP_PASSWORD=${ADMIN_BOOTSTRAP_PASSWORD}
+      - ADMIN_COOKIE_SECURE=${ADMIN_COOKIE_SECURE}
+      - ADMIN_TRUST_PROXY=${ADMIN_TRUST_PROXY}
+      - ADMIN_PORT=8001
+      - RELAY_PORT=8086
+    volumes:
+      - relay_data:/data
+    restart: unless-stopped
+
+volumes:
+  relay_data:
