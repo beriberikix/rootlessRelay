@@ -1,13 +1,40 @@
-FROM node:20-bookworm-slim
+# Node 24 is the current LTS line. Bump deliberately; the sqlite3 native
+# module ships prebuilt binaries per Node ABI and is rebuilt by `npm ci`.
+FROM node:24-bookworm-slim
 
+ENV NODE_ENV=production
 WORKDIR /app
 
-COPY package*.json ./
+# Install production dependencies first so this layer caches across code changes.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
 
-RUN npm ci --omit=dev
-
+# Runtime files only; tests, benchmarks, secrets and local state are excluded
+# by .dockerignore.
 COPY . .
 
-EXPOSE 8086 8001 8080 8443
+# Persistent state (the admin user database) lives on a volume at /data.
+RUN mkdir -p /data && chown -R node:node /data /app
 
-CMD ["npm", "start"]
+# Container-appropriate defaults. TLS is expected to terminate at a reverse
+# proxy or load balancer in front of the container, so the relay speaks plain
+# WebSocket here. Set ENABLE_WSS=true and mount key.pem/cert.pem into /app to
+# terminate TLS inside the container instead.
+ENV ENABLE_WSS=false \
+    WS_BIND_ADDRESS=0.0.0.0 \
+    WS_PORT=8086 \
+    ADMIN_BIND_ADDRESS=0.0.0.0 \
+    ADMIN_PORT=8001 \
+    PROXY_BIND_ADDRESS=0.0.0.0 \
+    PROXY_PORT=8080 \
+    ADMIN_AUTH_DB_PATH=/data/admin_auth.sqlite
+
+USER node
+
+EXPOSE 8086 8001 8080
+
+# Readiness: the WebSocket listener accepts TCP connections.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD node -e "require('net').connect(process.env.WS_PORT, '127.0.0.1').once('connect', () => process.exit(0)).once('error', () => process.exit(1))"
+
+CMD ["node", "relay.js"]

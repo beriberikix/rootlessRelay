@@ -1,21 +1,23 @@
-version: '3.8'
-
 services:
   relay:
     build: .
     ports:
+      # WebSocket data plane (plain WS; put TLS termination in front of it).
       - "8086:8086"
-      - "8001:8001"
-      - "8080:8080"
-      - "8443:8443"
+      # Admin UI and HTTP reverse proxy: published to the host loopback only.
+      # Remove the 127.0.0.1 prefix to expose them on the host's interfaces.
+      - "127.0.0.1:8001:8001"
+      - "127.0.0.1:8080:8080"
+    # Values are read from a .env file next to this compose.yml (see .env.example).
     environment:
-      - ADMIN_SESSION_SECRET=${ADMIN_SESSION_SECRET}
-      - ADMIN_BOOTSTRAP_USERNAME=${ADMIN_BOOTSTRAP_USERNAME}
-      - ADMIN_BOOTSTRAP_PASSWORD=${ADMIN_BOOTSTRAP_PASSWORD}
-      - ADMIN_COOKIE_SECURE=${ADMIN_COOKIE_SECURE}
-      - ADMIN_TRUST_PROXY=${ADMIN_TRUST_PROXY}
-      - ADMIN_PORT=8001
-      - RELAY_PORT=8086
+      ADMIN_SESSION_SECRET: ${ADMIN_SESSION_SECRET:?set ADMIN_SESSION_SECRET in .env}
+      # Only needed on first start, to create the initial admin user.
+      ADMIN_BOOTSTRAP_USERNAME: ${ADMIN_BOOTSTRAP_USERNAME:-}
+      ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD:-}
+      # Set both to true when the admin UI is served through an HTTPS reverse proxy.
+      ADMIN_COOKIE_SECURE: ${ADMIN_COOKIE_SECURE:-false}
+      ADMIN_TRUST_PROXY: ${ADMIN_TRUST_PROXY:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-1}
     volumes:
       - relay_data:/data
     restart: unless-stopped

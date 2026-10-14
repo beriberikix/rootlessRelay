@@ -164,6 +164,26 @@ ADMIN_TRUST_PROXY=true
 ADMIN_COOKIE_SECURE=true
 ```
 
+### 5. Running in Docker
+
+The image runs as the unprivileged `node` user, speaks plain WebSocket on
+port 8086, and keeps the admin user database on a volume at `/data`. TLS is
+expected to terminate at a reverse proxy or load balancer in front of the
+container.
+
+```bash
+cp .env.example .env   # set ADMIN_SESSION_SECRET and the bootstrap credentials
+docker compose up -d --build
+```
+
+The admin UI and HTTP reverse proxy are published on the host loopback only
+(`127.0.0.1:8001` and `127.0.0.1:8080`). The bootstrap credentials are used
+once, when the database is empty, and can be removed from `.env` afterwards.
+
+To terminate TLS inside the container instead, set `ENABLE_WSS=true`, mount
+`key.pem` and `cert.pem` into `/app`, and publish `WS_PORT` (default 8443 when
+WSS is on).
+
 ## IP-stack choke test
 
 The [performance investigation](benchmarks/PERFORMANCE.md) records the correctness
