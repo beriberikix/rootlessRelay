@@ -82,7 +82,11 @@ test("user store creates, verifies passwords, links external identities, bans", 
   assert.equal(listed.length, 3);
   assert.equal(listed[0].hasPassword, true);
   assert.equal("password_hash" in listed[0], false);
+  await db.run("INSERT INTO usage_monthly (user_id, month, bytes_in, bytes_out, sessions) VALUES (?, '2026-10', 1, 2, 3)", [ext.id]);
   assert.equal(await users.remove(ext.id), true);
+  assert.equal(await users.findById(ext.id), undefined);
+  assert.equal((await db.get("SELECT COUNT(*) AS n FROM usage_monthly WHERE user_id = ?", [ext.id])).n, 0);
+  assert.equal(await users.remove(ext.id), false);
   await db.close();
 });
 

@@ -410,6 +410,23 @@ function createAdminApp({
     res.status(200).json({ ...publicUser(await users.findById(id)), killedSessions: killed });
   }
 
+  app.delete("/api/users/:id", asyncRoute(async (req, res) => {
+    const id = parseId(req.params.id);
+    const user = id ? await users.findById(id) : null;
+    if (!user) {
+      res.sendStatus(404);
+      return;
+    }
+    if (user.id === req.user.id) {
+      res.status(400).json({ error: "cannot delete yourself" });
+      return;
+    }
+    const killed = registry ? registry.killOwner(`user:${id}`, 1008, "account deleted") : 0;
+    await users.remove(id);
+    log?.info("user deleted", { userId: id, username: user.username, killedSessions: killed, by: req.user.username });
+    res.sendStatus(204);
+  }));
+
   app.post("/api/users/:id/ban", asyncRoute((req, res) => setUserStatus(req, res, "banned")));
   app.post("/api/users/:id/unban", asyncRoute((req, res) => setUserStatus(req, res, "active")));
 

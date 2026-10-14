@@ -94,6 +94,16 @@ test("usage meter accumulates per-user months in SQLite and anon days in memory,
   usage.untrack(userSession);
   await usage.flush();
   assert.deepEqual(await usage.monthly(7), [{ month, bytesIn: 100, bytesOut: 960, sessions: 1 }]);
+
+  // A session whose bytes were all flushed before it closed still counts.
+  const quiet = { sessionId: "u2", identity: userSession.identity, clientIP: "1.1.1.1", bytesSent: 0, bytesReceived: 0 };
+  usage.track(quiet);
+  quiet.bytesSent = 40;
+  await usage.flush();
+  usage.untrack(quiet);
+  usage.untrack(quiet);
+  await usage.flush();
+  assert.deepEqual(await usage.monthly(7), [{ month, bytesIn: 100, bytesOut: 1000, sessions: 2 }]);
   clock += 24 * 60 * 60 * 1000;
   assert.notEqual(dayKey(clock), dayKey(clock - 24 * 60 * 60 * 1000));
   assert.equal(await usage.isOverQuota({ identity: anonSession.identity, clientIP: "9.9.9.9" }), false);
@@ -102,7 +112,7 @@ test("usage meter accumulates per-user months in SQLite and anon days in memory,
   const fresh = createUsageMeter({ db: database, tiers, now: () => clock, flushIntervalMs: 1e9, log: quietLog });
   assert.equal(await fresh.isOverQuota({ identity: userSession.identity, clientIP: "1.1.1.1" }), true);
   const rendered = await metrics.render();
-  assert.match(rendered, /rootlessrelay_bytes_total\{direction="to_vm",tier="user"\} 960/);
+  assert.match(rendered, /rootlessrelay_bytes_total\{direction="to_vm",tier="user"\} 1000/);
   usage.close();
   fresh.close();
   await database.close();

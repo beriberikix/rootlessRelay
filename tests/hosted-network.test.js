@@ -329,6 +329,19 @@ test("operator flow: users, tokens, sessions list, kill, ban, rules disabled", N
     assert.equal((await httpJson(relay.adminPort, { method: "DELETE", path: `/api/tokens/${tokenRes.body.id}`, cookie })).status, 204);
     assert.equal((await openWebSocket(relay.wsPort, { bearer: tokenRes.body.token })).status, 401);
 
+    const doomed = await httpJson(relay.adminPort, { method: "POST", path: "/api/users", cookie, body: { username: "dave", role: "user" } });
+    const doomedToken = await httpJson(relay.adminPort, { method: "POST", path: `/api/users/${doomed.body.id}/tokens`, cookie, body: {} });
+    const doomedConn = await openWebSocket(relay.wsPort, { bearer: doomedToken.body.token });
+    assert.equal(doomedConn.status, 101);
+    const deletedClose = new Promise((resolve) => doomedConn.ws.once("close", (code) => resolve(code)));
+    assert.equal((await httpJson(relay.adminPort, { method: "DELETE", path: `/api/users/${doomed.body.id}`, cookie })).status, 204);
+    assert.equal(await deletedClose, 1008);
+    assert.equal((await httpJson(relay.adminPort, { path: `/api/users/${doomed.body.id}`, cookie })).status, 404);
+    assert.equal((await openWebSocket(relay.wsPort, { bearer: doomedToken.body.token })).status, 401);
+    assert.equal((await httpJson(relay.adminPort, { method: "DELETE", path: `/api/users/${doomed.body.id}`, cookie })).status, 404);
+    const me = (await httpJson(relay.adminPort, { path: "/api/users", cookie })).body.find((u) => u.role === "operator");
+    assert.equal((await httpJson(relay.adminPort, { method: "DELETE", path: `/api/users/${me.id}`, cookie })).status, 400);
+
     assert.equal((await httpJson(relay.adminPort, { path: "/api/rules", cookie })).status, 403);
     assert.equal((await httpJson(relay.adminPort, {
       method: "POST", path: "/api/rules", cookie,

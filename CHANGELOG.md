@@ -38,6 +38,8 @@
 - Account API under `/api/me` on the public listener: a signed-in user can
   read their account, tier limits and usage, list and close their own
   sessions, and create, list and revoke their own API tokens.
+- `DELETE /api/users/:id` on the admin API, with a Delete button in the panel,
+  removes an account, its tokens and usage rows and closes its sessions.
 
 ### Changed (fork)
 
@@ -46,6 +48,8 @@
   the per-session download budget.
 - Missing operator bootstrap credentials no longer stop the relay; operator
   login is simply unavailable until an operator exists.
+- The SQLite database runs with `synchronous=NORMAL` and a 5 s
+  `busy_timeout`, as WAL-shipping backups such as Litestream expect.
 
 ### Fixed (fork)
 
@@ -54,6 +58,8 @@
   added.
 - A VM that changed its MAC mid-session no longer leaks its first IP
   allocation (the MAC is locked instead).
+- Monthly usage counted a session only if it moved bytes after the last
+  flush, so most sessions were never counted.
 
 ### Fixed
 

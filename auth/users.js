@@ -120,8 +120,13 @@ function createUserStore(db, { bcryptRounds = 12, now = Date.now } = {}) {
       return bcrypt.compare(password, user.password_hash);
     },
 
+    // Deletes the account, its API tokens (cascade) and its usage rows. The
+    // connection audit is keyed by owner and ages out on its own retention.
+    // Not wrapped in db.transaction: it shares the connection with the usage
+    // flush, and the order makes a partial delete harmless.
     async remove(id) {
       const result = await db.run("DELETE FROM users WHERE id = ?", [id]);
+      await db.run("DELETE FROM usage_monthly WHERE user_id = ?", [id]);
       return result.changes > 0;
     },
   };

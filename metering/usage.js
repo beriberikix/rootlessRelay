@@ -105,10 +105,13 @@ function createUsageMeter({
     if (q.store === "db") loadDbTotal(q.userId, q.month).catch((error) => log?.warn("usage load failed", { error }));
   }
 
+  // Every tracked session counts once at close, including one whose bytes
+  // were all flushed already (takeDelta then returns null).
   function untrack(session) {
-    const delta = takeDelta(session);
+    if (!tracked.has(session)) return;
+    const delta = takeDelta(session) || { in: 0, out: 0 };
     tracked.delete(session);
-    if (delta) applyDelta(session, delta, true);
+    applyDelta(session, delta, true);
   }
 
   function takeDelta(session) {

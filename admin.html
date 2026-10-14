@@ -773,6 +773,7 @@
       }
       buttons.push(el('button', { type: 'button', class: 'small secondary', text: 'Tier', 'data-action': 'tier', 'data-user': user.id, 'data-tier': user.tier }));
       buttons.push(el('button', { type: 'button', class: 'small secondary', text: 'Password', 'data-action': 'password', 'data-user': user.id }));
+      buttons.push(el('button', { type: 'button', class: 'small danger', text: 'Delete', 'data-action': 'delete', 'data-user': user.id, 'data-username': user.username }));
       return el('div', { class: 'actions' }, buttons);
     }
 
@@ -910,6 +911,14 @@
             await postJson(`/api/users/${userId}/unban`, {});
             showToaster('User unbanned');
             break;
+          case 'delete': {
+            const typed = window.prompt(`Delete ${button.dataset.username}, their tokens and usage? Type the username to confirm.`);
+            if (typed !== button.dataset.username) return;
+            await apiFetch(`/api/users/${userId}`, { method: 'DELETE' });
+            expandedUsers.delete(Number(userId));
+            showToaster('User deleted');
+            break;
+          }
           case 'tier': {
             const tier = window.prompt(`Tier (${(config.tiers || []).join(', ')})`, button.dataset.tier);
             if (!tier) return;

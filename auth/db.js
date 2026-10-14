@@ -127,7 +127,12 @@ function openDatabase(filename = ":memory:") {
     },
     async migrate() {
       if (filename !== ":memory:") {
+        // WAL plus NORMAL sync is durable across process crashes and is what
+        // WAL-shipping backup tools (Litestream) expect. busy_timeout lets
+        // writes wait out a backup checkpoint instead of failing SQLITE_BUSY.
         await db.exec("PRAGMA journal_mode = WAL");
+        await db.exec("PRAGMA synchronous = NORMAL");
+        await db.exec("PRAGMA busy_timeout = 5000");
       }
       await db.exec("PRAGMA foreign_keys = ON");
       let current = await db.version();
