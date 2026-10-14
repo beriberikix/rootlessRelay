@@ -357,7 +357,25 @@
     <!-- Audit -->
     <section id="section-audit" class="panel hidden">
       <h2>Connection Audit Log</h2>
+      <p class="muted">For an abuse report, enter the destination address and the time it gives; leave
+        <em>At</em> empty to browse by period.</p>
       <form id="audit-filters" class="toolbar">
+        <div class="form-group">
+          <label for="audit-dst">Destination IP</label>
+          <input id="audit-dst" class="catppuccin-input" type="text" placeholder="203.0.113.7" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label for="audit-port">Port</label>
+          <input id="audit-port" class="catppuccin-input" type="number" min="1" max="65535" style="width: 6em;">
+        </div>
+        <div class="form-group">
+          <label for="audit-at">At <span class="muted">(your local time)</span></label>
+          <input id="audit-at" class="catppuccin-input" type="datetime-local">
+        </div>
+        <div class="form-group">
+          <label for="audit-window">± minutes</label>
+          <input id="audit-window" class="catppuccin-input" type="number" min="0" max="1440" value="5" style="width: 6em;">
+        </div>
         <div class="form-group">
           <label for="audit-owner">Owner</label>
           <input id="audit-owner" class="catppuccin-input" type="text" placeholder="user:7 or anon:…">
@@ -406,6 +424,7 @@
             <th>In</th>
             <th>Out</th>
             <th>Duration</th>
+            <th></th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -1061,10 +1080,24 @@
       if (owner) params.set('owner', owner);
       const verdict = $('#audit-verdict').value;
       if (verdict) params.set('verdict', verdict);
-      const hours = Number($('#audit-since').value);
-      params.set('since', new Date(Date.now() - hours * 3600 * 1000).toISOString());
+      const dst = $('#audit-dst').value.trim();
+      if (dst) params.set('dstIp', dst);
+      const port = $('#audit-port').value.trim();
+      if (port) params.set('dstPort', port);
+      const at = $('#audit-at').value;
+      if (at) {
+        params.set('at', new Date(at).toISOString());
+        params.set('windowMinutes', $('#audit-window').value || '5');
+      } else {
+        const hours = Number($('#audit-since').value);
+        params.set('since', new Date(Date.now() - hours * 3600 * 1000).toISOString());
+      }
       params.set('limit', $('#audit-limit').value);
-      const result = await apiJson(`/api/audit?${params.toString()}`);
+      const [result, users] = await Promise.all([
+        apiJson(`/api/audit?${params.toString()}`),
+        apiJson('/api/users').catch(() => []),
+      ]);
+      const byOwner = new Map(users.map((u) => [`user:${u.id}`, u]));
       $('#audit-disabled').classList.toggle('hidden', result.enabled);
       const tbody = $('#audit tbody');
       tbody.innerHTML = '';
@@ -1072,7 +1105,7 @@
         const verdictKind = row.verdict.startsWith('deny') ? 'deny' : 'allow';
         tbody.appendChild(el('tr', {}, [
           el('td', { text: formatTime(row.startedAt) }),
-          el('td', { class: 'mono', text: row.owner }),
+          el('td', { class: 'mono', title: row.owner, text: byOwner.has(row.owner) ? byOwner.get(row.owner).username : row.owner }),
           el('td', { class: 'mono', title: row.sessionId, text: row.sessionId.slice(0, 8) }),
           el('td', { text: row.proto }),
           el('td', { class: 'mono', text: `${row.dstIP}:${row.dstPort}` }),
@@ -1080,11 +1113,27 @@
           el('td', { class: 'num', text: row.bytesIn === null ? '' : formatBytes(row.bytesIn) }),
           el('td', { class: 'num', text: row.bytesOut === null ? '' : formatBytes(row.bytesOut) }),
           el('td', { text: formatDuration(row.startedAt, row.endedAt) }),
+          el('td', {}, byOwner.has(row.owner) && byOwner.get(row.owner).status !== 'banned'
+            ? [el('button', { type: 'button', class: 'small danger', text: 'Ban owner', 'data-action': 'ban-owner', 'data-user': byOwner.get(row.owner).id, 'data-username': byOwner.get(row.owner).username })]
+            : []),
         ]));
       }
       emptyState('#audit', '#audit-empty', result.enabled && result.rows.length === 0);
       if (!result.enabled) $('#audit').classList.add('hidden');
     }
+
+    $('#audit').addEventListener('click', async (event) => {
+      const button = event.target.closest('button[data-action="ban-owner"]');
+      if (!button) return;
+      if (!window.confirm(`Ban ${button.dataset.username} and terminate their sessions?`)) return;
+      try {
+        await postJson(`/api/users/${button.dataset.user}/ban`, {});
+        showToaster('User banned');
+        await loadAudit();
+      } catch (error) {
+        showToaster(error.message, true);
+      }
+    });
 
     $('#audit-filters').addEventListener('submit', (event) => {
       event.preventDefault();

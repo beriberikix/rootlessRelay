@@ -117,6 +117,13 @@ const MIGRATIONS = [
       `);
     },
   },
+  {
+    // Abuse lookups search the audit by destination and time.
+    version: 3,
+    async up(db) {
+      await db.exec("CREATE INDEX IF NOT EXISTS connections_audit_dst_started ON connections_audit(dst_ip, started_at)");
+    },
+  },
 ];
 
 function openDatabase(filename = ":memory:") {

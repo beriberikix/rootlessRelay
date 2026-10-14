@@ -515,10 +515,22 @@ function createAdminApp({
       res.status(400).json({ error: "since/until must be ISO timestamps" });
       return;
     }
+    const at = req.query.at ? new Date(req.query.at).getTime() : null;
+    const windowMinutes = req.query.windowMinutes ? Number(req.query.windowMinutes) : 5;
+    const dstPort = req.query.dstPort ? Number(req.query.dstPort) : null;
+    if ((at !== null && Number.isNaN(at)) || !(windowMinutes >= 0 && windowMinutes <= 1440)
+      || (dstPort !== null && !(Number.isInteger(dstPort) && dstPort > 0 && dstPort < 65536))) {
+      res.status(400).json({ error: "at must be an ISO timestamp, windowMinutes 0-1440, dstPort 1-65535" });
+      return;
+    }
     const rows = await audit.query({
       owner: req.query.owner || null,
       sessionId: req.query.sessionId || null,
       verdict: req.query.verdict || null,
+      dstIP: req.query.dstIp || null,
+      dstPort,
+      at,
+      windowMs: windowMinutes * 60 * 1000,
       since,
       until,
       limit: req.query.limit ? Number(req.query.limit) : 200,

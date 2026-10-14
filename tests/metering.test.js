@@ -44,8 +44,19 @@ test("audit log batches inserts, updates rows on finish, queries and prunes", as
   assert.equal((await audit.query({ owner: "user:2" })).length, 0);
   assert.equal((await audit.query({ since: clock + 1 })).length, 0);
 
+  // Abuse lookup: destination plus a moment, matching connections open then.
+  audit.record({ key: "s2:c", owner: "user:2", sessionId: "s2", proto: "tcp", dstIP: "1.1.1.1", dstPort: 443, verdict: "allow", startedAt: clock + 1000 });
+  await audit.flush();
+  const at = (t, windowMs = 0) => audit.query({ dstIP: "1.1.1.1", at: t, windowMs }).then((r) => r.map((row) => row.owner).sort());
+  assert.deepEqual(await at(clock + 5), ["user:1"]);
+  assert.deepEqual(await at(clock + 500), [], "s1:a ended at +10 and s2:c starts at +1000");
+  assert.deepEqual(await at(clock + 500, 600), ["user:1", "user:2"]);
+  assert.deepEqual(await at(clock + 10_000), ["user:2"], "a still-open connection matches any later moment");
+  assert.equal((await audit.query({ dstIP: "1.1.1.1", dstPort: 80 })).length, 0);
+  assert.equal((await audit.query({ dstIP: "1.1.1.2", dstPort: 80 })).length, 1);
+
   clock += 2 * 24 * 60 * 60 * 1000;
-  assert.equal(await audit.prune(), 3);
+  assert.equal(await audit.prune(), 4);
   audit.close();
   const disabled = noopAudit();
   disabled.record({});

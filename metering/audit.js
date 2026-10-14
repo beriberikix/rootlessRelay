@@ -136,9 +136,26 @@ function createAuditLog({
     return result.changes;
   }
 
-  async function query({ owner = null, sessionId = null, since = null, until = null, verdict = null, limit = 200 } = {}) {
+  // `at` (ms) with `windowMs` finds connections open at that moment, which is
+  // what an abuse report gives: a destination and a time.
+  async function query({
+    owner = null, sessionId = null, since = null, until = null, verdict = null, limit = 200,
+    dstIP = null, dstPort = null, at = null, windowMs = 5 * 60 * 1000,
+  } = {}) {
     const where = [];
     const params = [];
+    if (dstIP) {
+      where.push("dst_ip = ?");
+      params.push(dstIP);
+    }
+    if (dstPort !== null) {
+      where.push("dst_port = ?");
+      params.push(dstPort);
+    }
+    if (at !== null) {
+      where.push("started_at <= ? AND (ended_at IS NULL OR ended_at >= ?)");
+      params.push(at + windowMs, at - windowMs);
+    }
     if (owner) {
       where.push("owner = ?");
       params.push(owner);

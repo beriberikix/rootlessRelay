@@ -42,6 +42,10 @@
   `pending` (migration 2 adds the status and an `invites` table) and redeem a
   single-use code via `POST /api/me/redeem`; operators create, list and revoke
   codes and activate accounts from the panel's Invites section.
+- Abuse lookup: `GET /api/audit` takes `dstIp`, `dstPort`, `at` and
+  `windowMinutes` to find connections open to a destination at a moment;
+  the panel's audit tab searches that way, shows usernames and can ban the
+  owner from a result row (migration 3 indexes the audit by destination).
 - `DELETE /api/me` lets a signed-in user delete their own account after
   typing their username back.
 - `DELETE /api/users/:id` on the admin API, with a Delete button in the panel,

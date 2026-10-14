@@ -351,6 +351,9 @@ test("operator flow: users, tokens, sessions list, kill, ban, rules disabled", N
     assert.equal((await httpJson(relay.adminPort, { method: "DELETE", path: `/api/invites/${invite.body.id}`, cookie })).status, 204);
     assert.equal((await httpJson(relay.adminPort, { method: "DELETE", path: `/api/invites/${invite.body.id}`, cookie })).status, 404);
     assert.equal((await httpJson(relay.adminPort, { path: "/api/config", cookie })).body.signupMode, "open");
+    assert.equal((await httpJson(relay.adminPort, { path: "/api/audit?dstIp=1.2.3.4&at=2026-10-14T00:00:00Z&windowMinutes=10", cookie })).status, 200);
+    assert.equal((await httpJson(relay.adminPort, { path: "/api/audit?at=yesterday", cookie })).status, 400);
+    assert.equal((await httpJson(relay.adminPort, { path: "/api/audit?dstPort=70000", cookie })).status, 400);
 
     assert.equal((await httpJson(relay.adminPort, { path: "/api/rules", cookie })).status, 403);
     assert.equal((await httpJson(relay.adminPort, {
