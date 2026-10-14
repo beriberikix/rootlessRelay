@@ -1,5 +1,6 @@
 key.pem
 cert.pem
 node_modules/
+performance-results/
 .env
 admin_auth.sqlite

@@ -1,12 +1,35 @@
 {
   "name": "rootlessrelay",
-  "version": "0.5.6",
+  "version": "0.6.0",
   "description": "A WebSocket based VPN/proxy relay for virtual machines.",
   "main": "relay.js",
+  "bin": {
+    "rootlessrelay": "relay.js"
+  },
+  "files": [
+    "relay.js",
+    "tcp_utils.js",
+    "packet_utils.js",
+    "rate_limiter.js",
+    "tcp_pacer.js",
+    "tcp_retransmission.js",
+    "udp_flow_manager.js",
+    "admin.html",
+    "CHANGELOG.md"
+  ],
   "scripts": {
+    "prepublishOnly": "npm test",
     "start": "node relay.js",
     "keygen": "openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes",
-    "test": "node --test tests/*.test.js"
+    "test": "node --test tests/*.test.js",
+    "test:network": "RUN_NETWORK_TESTS=1 node --test --test-concurrency=1 tests/*-network.test.js",
+    "bench:ip-stack": "node benchmarks/ip-stack-throughput.js",
+    "bench:ws": "node benchmarks/ws-relay-throughput.js",
+    "bench:tcp-egress": "node benchmarks/tcp-egress-throughput.js",
+    "bench:tcp-ingress": "node benchmarks/tcp-ingress-throughput.js",
+    "bench:tcp-compare": "node benchmarks/compare-tcp-egress.js",
+    "bench:tcp-ingress-compare": "node benchmarks/compare-tcp-egress.js --direction=ingress",
+    "bench:tcp-ceiling": "node benchmarks/compare-tcp-egress.js --windows=65535 --ack-delay-ms=0 --ack-every=1 --rx-queue-packets=0 --rx-service-ms=0 --pacing-mode=off --send-burst-segments=64 --send-burst-max-segments=64 --send-burst-interval-ms=0 --source-bytes=134217728"
   },
   "repository": {
     "type": "git",
@@ -35,6 +58,9 @@
     "passport": "^0.7.0",
     "passport-local": "^1.0.0",
     "sqlite3": "^5.1.7",
-    "ws": "^8.17.0"
+    "ws": "^8.21.0"
+  },
+  "allowScripts": {
+    "sqlite3@5.1.7": true
   }
 }
