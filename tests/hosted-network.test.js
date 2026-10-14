@@ -339,6 +339,76 @@ test("operator flow: users, tokens, sessions list, kill, ban, rules disabled", N
   }
 });
 
+test("audit log, usage, metrics and quota enforcement", NETWORK, async () => {
+  const relay = await startRelay({
+    hosted: true,
+    env: {
+      EGRESS_ALLOW_CIDRS: "127.0.0.0/8",
+      USAGE_FLUSH_INTERVAL_MS: "150",
+      METRICS_TOKEN: "scrape-me",
+      TIERS_JSON: JSON.stringify({ user: { quotaBytes: 2000 } }),
+    },
+  });
+  const sink = net.createServer((socket) => {
+    socket.on("data", () => {});
+    socket.write(Buffer.alloc(1500, 0x41));
+  });
+  const sinkPort = await listen(sink);
+  try {
+    const cookie = await relay.adminCookie();
+    const created = await httpJson(relay.adminPort, { method: "POST", path: "/api/users", cookie, body: { username: "dave", password: "dave-password" } });
+    const tokenRes = await httpJson(relay.adminPort, { method: "POST", path: `/api/users/${created.body.id}/tokens`, cookie, body: {} });
+    const { ws } = await openWebSocket(relay.wsPort, { token: tokenRes.body.token });
+    const frames = new FrameQueue(ws);
+    const closed = new Promise((resolve) => ws.once("close", (code, reason) => resolve({ code, reason: reason.toString() })));
+    const vmMAC = macFromNumber(20);
+    const session = await bringUp(relay, ws, vmMAC, cookie);
+
+    // One denied and one allowed connection.
+    ws.send(buildTCPFrame({ vmMAC, srcIP: session.vmIP, dstIP: "169.254.169.254", srcPort: 41000, dstPort: 80, seq: 1, flags: { syn: true } }));
+    await frames.waitFor((f) => f.kind === "tcp" && f.dstPort === 41000 && f.rst);
+    ws.send(buildTCPFrame({ vmMAC, srcIP: session.vmIP, dstIP: "127.0.0.1", srcPort: 41001, dstPort: sinkPort, seq: 1, flags: { syn: true } }));
+    const synAck = await frames.waitFor((f) => f.kind === "tcp" && f.dstPort === 41001 && f.syn);
+    ws.send(buildTCPFrame({ vmMAC, srcIP: session.vmIP, dstIP: "127.0.0.1", srcPort: 41001, dstPort: sinkPort, seq: 2, ack: synAck.seq + 1, flags: { ack: true } }));
+    // The sink pushes 1500 bytes toward the VM; acknowledge what arrives so
+    // the relay keeps sending and the session's byte counters grow.
+    const data = await frames.waitFor((f) => f.kind === "tcp" && f.dstPort === 41001 && f.payload.length > 0, 3000);
+    ws.send(buildTCPFrame({ vmMAC, srcIP: session.vmIP, dstIP: "127.0.0.1", srcPort: 41001, dstPort: sinkPort, seq: 2, ack: data.seq + data.payload.length, flags: { ack: true } }));
+
+    // Keep pushing bytes through until the 2000-byte user quota closes the session.
+    const quotaClose = await Promise.race([closed, delay(6000).then(() => null)]);
+    assert.deepEqual(quotaClose, { code: 1008, reason: "quota exceeded" });
+
+    const usageRes = await httpJson(relay.adminPort, { path: `/api/usage/${created.body.id}`, cookie });
+    assert.equal(usageRes.status, 200);
+    assert.equal(usageRes.body.quotaBytes, 2000);
+    assert.ok(usageRes.body.currentPeriodBytes >= 2000, `usage ${usageRes.body.currentPeriodBytes}`);
+    assert.equal(usageRes.body.months.length, 1);
+    assert.equal((await openWebSocket(relay.wsPort, { token: tokenRes.body.token })).status, 429, "over quota is refused at upgrade");
+
+    await delay(2500); // audit batch interval
+    const auditRes = await httpJson(relay.adminPort, { path: `/api/audit?owner=user:${created.body.id}`, cookie });
+    assert.equal(auditRes.status, 200);
+    assert.equal(auditRes.body.enabled, true);
+    const verdicts = auditRes.body.rows.map((row) => `${row.dstIP}:${row.dstPort}=${row.verdict.split(":")[0]}`).sort();
+    assert.deepEqual(verdicts, [`127.0.0.1:${sinkPort}=allow`, "169.254.169.254:80=deny"]);
+    const allowed = auditRes.body.rows.find((row) => row.verdict.startsWith("allow"));
+    assert.ok(allowed.endedAt, "allowed connection has an end time after the session closed");
+    assert.equal((await httpJson(relay.adminPort, { path: "/api/audit?verdict=deny", cookie })).body.rows.length, 1);
+
+    assert.equal((await httpJson(relay.adminPort, { path: "/metrics" })).status, 401);
+    const scraped = await httpJson(relay.adminPort, { path: "/metrics", headers: { Authorization: "Bearer scrape-me" } });
+    assert.equal(scraped.status, 200);
+    assert.match(scraped.text, /rootlessrelay_egress_denied_total\{proto="tcp"\} 1/);
+    assert.match(scraped.text, /rootlessrelay_bytes_total\{direction="to_vm",tier="user"\} [1-9]/);
+    assert.match(scraped.text, /rootlessrelay_upgrade_rejections_total\{status="429"\} 1/);
+    assert.equal((await httpJson(relay.adminPort, { path: "/metrics", cookie })).status, 200);
+  } finally {
+    sink.close();
+    await relay.close();
+  }
+});
+
 test("healthz and graceful shutdown: clients get 1001 and the process exits 0 within a second", NETWORK, async () => {
   const relay = await startRelay({ hosted: true });
   const token = await anonToken(relay);

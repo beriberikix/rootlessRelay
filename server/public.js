@@ -136,6 +136,7 @@ function createPublicServer({
   sessionCount = () => 0,
   handleAnonToken = null,
   adminApp = null,
+  metrics = null,
 }) {
   const allowedOrigins = config.allowedOrigins ? new Set(config.allowedOrigins) : null;
 
@@ -258,9 +259,10 @@ function createPublicServer({
       }
 
       if (admission) {
-        const verdict = admission.admit({ identity, clientIP });
+        const verdict = await admission.admit({ identity, clientIP });
         if (!verdict.ok) {
           log?.warn("upgrade rejected: admission", { clientIP, owner: identity.owner, reason: verdict.reason });
+          metrics?.upgradeRejections?.inc({ status: String(verdict.status) });
           rejectUpgrade(socket, verdict.status, verdict.reason);
           return;
         }
@@ -272,6 +274,8 @@ function createPublicServer({
     } catch (error) {
       if (error instanceof AuthError || (error && error.status)) {
         log?.warn("upgrade rejected: auth", { code: error.code, status: error.status });
+        metrics?.authFailures?.inc({ code: String(error.code || error.status) });
+        metrics?.upgradeRejections?.inc({ status: String(error.status) });
         rejectUpgrade(socket, error.status, error.code);
         return;
       }

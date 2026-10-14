@@ -187,6 +187,7 @@ function resolveConfig(env = process.env) {
       min: 100,
     }),
     metricsEnabled: parseBool(env.METRICS_ENABLED, defaults.metricsEnabled),
+    metricsToken: env.METRICS_TOKEN || null,
     logJson: parseBool(env.LOG_JSON, defaults.logJson),
 
     adminPublicPath: env.ADMIN_PUBLIC_PATH || null,

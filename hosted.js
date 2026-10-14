@@ -19,9 +19,23 @@ const { openDatabase } = require("./auth/db");
 const { createUserStore } = require("./auth/users");
 const { SqliteSessionStore } = require("./auth/session_store");
 const tokens = require("./auth/tokens");
+const { createAuditLog, noopAudit } = require("./metering/audit");
+const { createUsageMeter, noopUsage } = require("./metering/usage");
+const { createMetrics } = require("./metrics");
 const admin = require("./admin/app");
 
 const POOL_PREFIX = "10.0.2.";
+
+// Forwarders let the policy factory and connection handler be built before
+// the database is open; the real implementations are swapped in on ready.
+function forwarder(ref, methods) {
+  const target = {};
+  for (const method of methods) {
+    target[method] = (...args) => ref.current[method](...args);
+  }
+  Object.defineProperty(target, "enabled", { get: () => ref.current.enabled });
+  return target;
+}
 
 function init(ctx) {
   const config = resolveConfig(ctx.env || process.env);
@@ -35,6 +49,8 @@ function init(ctx) {
     egressPolicy: config.egressPolicy,
     inboundRules: config.inboundRulesEnabled,
     antiSpoof: config.antiSpoof,
+    audit: config.auditEnabled,
+    metrics: config.metricsEnabled,
   });
 
   const egress = createEgressPolicy({
@@ -64,8 +80,14 @@ function init(ctx) {
     connectionsPerIP: ctx.connectionsPerIP,
   };
 
+  const metrics = createMetrics({ enabled: config.metricsEnabled });
+  const auditRef = { current: noopAudit() };
+  const usageRef = { current: noopUsage() };
+  const audit = forwarder(auditRef, ["record", "finish", "flush", "prune", "query", "pendingCount", "close"]);
+  const usage = forwarder(usageRef, ["track", "untrack", "flush", "isOverQuota", "periodUsage", "monthly", "close"]);
+
   const registry = createSessionRegistry({ ctx: policyCtx, tiers });
-  const policyFactory = createPolicyFactory({ config, tiers, egress, ctx: policyCtx, log });
+  const policyFactory = createPolicyFactory({ config, tiers, egress, ctx: policyCtx, audit, metrics, log });
   const lifecycle = installLifecycle({
     servers: [],
     getSessions: () => registry.sessions.values(),
@@ -74,6 +96,18 @@ function init(ctx) {
     hardExitMs: config.hardExitMs,
     log,
   });
+
+  // Admission: registry caps first, then the byte quota for the identity.
+  const admission = {
+    async admit(args) {
+      const verdict = registry.admit(args);
+      if (!verdict.ok) return verdict;
+      if (await usage.isOverQuota(args)) {
+        return { ok: false, status: 429, reason: "quota exceeded" };
+      }
+      return verdict;
+    },
+  };
 
   // Identity services become available once the database is open; upgrade
   // requests that arrive earlier wait on `ready`.
@@ -114,11 +148,12 @@ function init(ctx) {
       log,
       tls,
       authenticate,
-      admission: registry,
+      admission,
       wssOptions: { maxPayload },
       lifecycle,
       sessionCount: () => registry.size,
       handleAnonToken: config.anonEnabled ? handleAnonToken : null,
+      metrics,
     });
     state.publicServer = publicServer;
     lifecycle.addServer(publicServer.server);
@@ -146,6 +181,8 @@ function init(ctx) {
       policyFactory,
       registry,
       log,
+      metrics,
+      usage,
     });
   }
 
@@ -191,11 +228,36 @@ function init(ctx) {
           if (!ok) throw new AuthError(403, "captcha-failed");
         }
         const issued = await state.anon.issue({ ip: clientIP });
+        metrics.anonTokensIssued.inc();
         log.info("anon token issued", { clientIP });
         return { token: issued.token, expiresAt: issued.expiresAt, tier: "anon" };
       };
     }
-    lifecycle.addFlusher(() => db.close());
+
+    auditRef.current = createAuditLog({
+      db,
+      enabled: config.auditEnabled,
+      retentionDays: config.auditRetentionDays,
+      log,
+    });
+    usageRef.current = createUsageMeter({
+      db,
+      enabled: true,
+      tiers,
+      flushIntervalMs: config.usageFlushIntervalMs,
+      metrics,
+      log,
+      onQuotaExceeded: (session) => {
+        if (session.ws && session.ws.readyState === 1) session.ws.close(1008, "quota exceeded");
+      },
+    });
+    lifecycle.addFlusher(async () => {
+      await usage.flush();
+      await audit.flush();
+      usage.close();
+      audit.close();
+      await db.close();
+    });
     return db;
   }
 
@@ -217,6 +279,9 @@ function init(ctx) {
         proxyPort: ctx.PROXY_PORT,
         poolCtx: { poolPrefix: POOL_PREFIX, dhcpStart: ctx.DHCP_START, dhcpEnd: ctx.DHCP_END },
         tiers,
+        audit,
+        usage,
+        metrics,
         log,
       });
       const server = await admin.startAdminServer(app, {
@@ -244,6 +309,9 @@ function init(ctx) {
     registry,
     policyFactory,
     lifecycle,
+    metrics,
+    audit,
+    usage,
     state,
     ready,
     createWebSocketServer,

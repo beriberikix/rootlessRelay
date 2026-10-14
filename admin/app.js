@@ -149,10 +149,14 @@ function createAdminApp({
   proxyPort,
   poolCtx,
   tiers = null,
+  audit = null,
+  usage = null,
+  metrics = null,
   adminHtmlPath = path.join(__dirname, "..", "admin.html"),
   log,
 }) {
   const app = express();
+
   const loginLimiter = createLoginRateLimiter({
     windowMs: config.adminLoginWindowMs,
     maxAttempts: config.adminLoginMaxAttempts,
@@ -179,6 +183,25 @@ function createAdminApp({
   );
   app.use(passport.initialize());
   app.use(passport.session());
+
+  // Prometheus scrape endpoint: operator session or METRICS_TOKEN bearer.
+  app.get("/metrics", asyncRoute(async (req, res) => {
+    if (!metrics || !metrics.enabled) {
+      res.status(404).json({ error: "metrics are disabled" });
+      return;
+    }
+    const authorization = req.headers.authorization || "";
+    const bearer = /^bearer\s+/i.test(authorization) ? authorization.replace(/^bearer\s+/i, "").trim() : null;
+    const tokenOk = config.metricsToken && bearer && bearer.length === config.metricsToken.length &&
+      require("crypto").timingSafeEqual(Buffer.from(bearer), Buffer.from(config.metricsToken));
+    const sessionOk = req.isAuthenticated && req.isAuthenticated();
+    if (!tokenOk && !sessionOk) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    res.set("Content-Type", metrics.contentType);
+    res.status(200).send(await metrics.render());
+  }));
 
   app.get("/", (_req, res) => {
     res.sendFile(adminHtmlPath);
@@ -419,6 +442,50 @@ function createAdminApp({
       throw error;
     }
     res.sendStatus(204);
+  }));
+
+  // --- audit log and usage --------------------------------------------------
+
+  app.get("/api/audit", asyncRoute(async (req, res) => {
+    if (!audit || !audit.enabled) {
+      res.status(200).json({ enabled: false, rows: [] });
+      return;
+    }
+    const since = req.query.since ? new Date(req.query.since).getTime() : null;
+    const until = req.query.until ? new Date(req.query.until).getTime() : null;
+    if ((since !== null && Number.isNaN(since)) || (until !== null && Number.isNaN(until))) {
+      res.status(400).json({ error: "since/until must be ISO timestamps" });
+      return;
+    }
+    const rows = await audit.query({
+      owner: req.query.owner || null,
+      sessionId: req.query.sessionId || null,
+      verdict: req.query.verdict || null,
+      since,
+      until,
+      limit: req.query.limit ? Number(req.query.limit) : 200,
+    });
+    res.status(200).json({ enabled: true, rows });
+  }));
+
+  app.get("/api/usage/:id", asyncRoute(async (req, res) => {
+    const id = parseId(req.params.id);
+    const user = id ? await users.findById(id) : null;
+    if (!user) {
+      res.sendStatus(404);
+      return;
+    }
+    const tier = tiers ? tiers[user.tier] || tiers.user : null;
+    res.status(200).json({
+      userId: id,
+      tier: user.tier,
+      quotaBytes: tier ? tier.quotaBytes : null,
+      quotaPeriod: tier ? tier.quotaPeriod : null,
+      currentPeriodBytes: usage
+        ? await usage.periodUsage({ identity: { userId: id, tier: user.tier, owner: `user:${id}` }, clientIP: null })
+        : null,
+      months: usage ? await usage.monthly(id) : [],
+    });
   }));
 
   // --- inbound rules --------------------------------------------------------

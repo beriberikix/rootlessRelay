@@ -1,7 +1,9 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 
 <head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>rootlessRelay admin</title>
   <style>
     :root {
@@ -33,340 +35,160 @@
       --ctp-crust: #11111b;
     }
 
+    * { box-sizing: border-box; }
+
     body {
       font-family: -apple-system, BlinkMacSystemFont, avenir next, avenir, segoe ui, helvetica neue, Cantarell, Ubuntu, roboto, noto, helvetica, arial, sans-serif;
       background-color: var(--ctp-base);
       color: var(--ctp-text);
-      margin: 50px;
+      margin: 0;
+      padding: 24px 32px 48px;
     }
+
+    h1 { color: var(--ctp-rosewater); margin: 0; font-size: 1.6em; }
+    h2 { color: var(--ctp-lavender); margin: 0 0 12px; font-size: 1.2em; }
+    h3 { color: var(--ctp-subtext1); margin: 16px 0 8px; font-size: 1em; }
+    a { color: var(--ctp-blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; }
+    code { background-color: var(--ctp-surface0); padding: 2px 4px; border-radius: 4px; }
+    .muted { color: var(--ctp-subtext0); }
+    .hidden { display: none !important; }
 
     table {
       border-collapse: collapse;
       width: 100%;
       background-color: var(--ctp-mantle);
       color: var(--ctp-text);
+      font-size: 0.94em;
     }
+    th, td { border: 1px solid var(--ctp-surface1); padding: 7px 9px; text-align: left; vertical-align: top; }
+    th { background-color: var(--ctp-surface0); color: var(--ctp-text); white-space: nowrap; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    tr.detail-row td { background-color: var(--ctp-crust); }
+    .empty { color: var(--ctp-subtext0); font-style: italic; padding: 12px; }
 
-    th,
-    td {
-      border: 1px solid var(--ctp-surface1);
-      padding: 8px;
-      text-align: left;
+    .top-actions { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 12px; flex-wrap: wrap; }
+    .top-actions .right { display: flex; align-items: center; gap: 12px; }
+
+    .badge {
+      display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.8em; font-weight: 600;
+      background-color: var(--ctp-surface1); color: var(--ctp-text); white-space: nowrap;
     }
+    .badge.local { background-color: var(--ctp-yellow); color: var(--ctp-crust); }
+    .badge.hosted { background-color: var(--ctp-green); color: var(--ctp-crust); }
+    .badge.anon { background-color: var(--ctp-peach); color: var(--ctp-crust); }
+    .badge.user { background-color: var(--ctp-blue); color: var(--ctp-crust); }
+    .badge.operator { background-color: var(--ctp-mauve); color: var(--ctp-crust); }
+    .badge.banned { background-color: var(--ctp-red); color: var(--ctp-crust); }
+    .badge.active { background-color: var(--ctp-green); color: var(--ctp-crust); }
+    .badge.deny { background-color: var(--ctp-red); color: var(--ctp-crust); }
+    .badge.allow { background-color: var(--ctp-surface2); color: var(--ctp-text); }
 
-    th {
-      background-color: var(--ctp-surface0);
-      color: var(--ctp-text);
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+    .card { background-color: var(--ctp-mantle); border: 1px solid var(--ctp-surface1); border-radius: 8px; padding: 12px 14px; }
+    .card .label { color: var(--ctp-subtext0); font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.04em; }
+    .card .value { font-size: 1.5em; font-variant-numeric: tabular-nums; margin-top: 4px; }
+
+    .section-tabs { display: flex; gap: 6px; border-bottom: 2px solid var(--ctp-surface1); margin-bottom: 16px; flex-wrap: wrap; }
+    .section-tab {
+      background-color: var(--ctp-mantle); color: var(--ctp-blue); border: none; padding: 10px 16px; cursor: pointer;
+      border-radius: 6px 6px 0 0; font-size: 0.95em; transition: background-color 0.2s ease, color 0.2s ease;
     }
+    .section-tab:hover { background-color: var(--ctp-surface1); color: var(--ctp-text); }
+    .section-tab.active { background-color: var(--ctp-mauve); color: var(--ctp-crust); }
 
-    form {
-      margin-bottom: 20px;
+    .panel { background-color: var(--ctp-mantle); padding: 18px; border-radius: 8px; border: 1px solid var(--ctp-surface1); }
+    .panel + .panel { margin-top: 16px; }
+    .row { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+    .toolbar { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 12px; }
+
+    form { margin: 0; }
+    .form-group { margin-bottom: 10px; display: flex; flex-direction: column; }
+    .form-group label { margin-bottom: 4px; color: var(--ctp-subtext1); font-size: 0.88em; }
+    .form-group input[type="text"], .form-group input[type="password"], .form-group select, input.catppuccin-input, select.catppuccin-input {
+      width: 200px; padding: 8px; border: 1px solid var(--ctp-surface1); border-radius: 4px;
+      background-color: var(--ctp-crust); color: var(--ctp-text);
     }
+    .optional-text { font-size: 0.8em; color: var(--ctp-subtext0); margin-top: 2px; }
 
-    .form-group {
-      margin-bottom: 10px;
-      display: flex;
-      flex-direction: column;
-    }
-
-    .form-group label {
-      margin-bottom: 5px;
-      color: var(--ctp-text);
-    }
-
-    .form-group input[type="text"],
-    .form-group select {
-      width: 200px;
-      padding: 8px;
-      border: 1px solid var(--ctp-surface1);
-      border-radius: 4px;
-      background-color: var(--ctp-crust);
-      color: var(--ctp-text);
-    }
-
-    .optional-text {
-      font-size: 0.8em;
-      color: var(--ctp-subtext0);
-      margin-top: 2px;
-    }
-
-    .toaster-notification {
-      position: fixed;
-      top: 20px;
-      left: 50%;
-      transform: translateX(-50%);
-      background-color: var(--ctp-green);
-      color: var(--ctp-crust);
-      padding: 10px 20px;
-      border-radius: 5px;
-      opacity: 0;
-      transition: opacity 0.5s ease-in-out;
-      z-index: 1000;
-    }
-
-    .toaster-notification.show {
-      opacity: 1;
-    }
-
-    h1 {
-      color: var(--ctp-rosewater);
-    }
-
-    h2 {
-      color: var(--ctp-lavender);
-    }
-
-    a {
-      color: var(--ctp-blue);
-      text-decoration: none;
-    }
-
-    a:hover {
-      text-decoration: underline;
-    }
-
-    code {
-      background-color: var(--ctp-surface0);
-      color: var(--ctp-text);
-      padding: 2px 4px;
-      border-radius: 4px;
-    }
-
-    .common-buttons button,
-    button[type="submit"],
-    .catppuccin-button {
-      background-color: var(--ctp-blue);
-      color: var(--ctp-crust);
-      border: none;
-      padding: 10px 15px;
-      border-radius: 5px;
-      cursor: pointer;
-      transition: background-color 0.2s ease;
-      margin-right: 10px;
-      /* Space between buttons */
-    }
-
-    .common-buttons button:hover,
-    button[type="submit"]:hover,
-    .catppuccin-button:hover {
-      background-color: var(--ctp-sapphire);
-    }
-
-    button.delete-button {
-      background-color: var(--ctp-red);
-    }
-
-    button.delete-button:hover {
-      background-color: var(--ctp-maroon);
-    }
-
-    input.catppuccin-input {
-      padding: 8px;
-      border: 1px solid var(--ctp-surface1);
-      border-radius: 4px;
-      background-color: var(--ctp-crust);
-      color: var(--ctp-text);
-    }
-
-    input:-webkit-autofill,
-    input:-webkit-autofill:hover,
-    input:-webkit-autofill:focus,
-    input:-webkit-autofill:active {
+    input:-webkit-autofill, input:-webkit-autofill:hover, input:-webkit-autofill:focus {
       -webkit-box-shadow: 0 0 0px 1000px var(--ctp-crust) inset !important;
       -webkit-text-fill-color: var(--ctp-text) !important;
-      background-color: var(--ctp-crust) !important;
-      color: var(--ctp-text) !important;
     }
 
-    .copy-button {
-      margin-bottom: 5px;
-      /* Add some space below each copy button */
+    button, .catppuccin-button {
+      background-color: var(--ctp-blue); color: var(--ctp-crust); border: none; padding: 8px 13px; border-radius: 5px;
+      cursor: pointer; transition: background-color 0.2s ease; font-size: 0.9em;
     }
+    button:hover, .catppuccin-button:hover { background-color: var(--ctp-sapphire); }
+    button.small { padding: 4px 9px; font-size: 0.82em; }
+    button.delete-button, button.danger { background-color: var(--ctp-red); }
+    button.delete-button:hover, button.danger:hover { background-color: var(--ctp-maroon); }
+    button.success { background-color: var(--ctp-green); }
+    button.success:hover { background-color: var(--ctp-teal); }
+    button.secondary { background-color: var(--ctp-surface1); color: var(--ctp-text); }
+    button.secondary:hover { background-color: var(--ctp-surface2); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
-    /* Style for radio buttons and checkboxes */
-    input[type="radio"],
     input[type="checkbox"] {
-      /* Hide default radio/checkbox */
-      appearance: none;
-      -webkit-appearance: none;
-      -moz-appearance: none;
-      width: 16px;
-      height: 16px;
-      border: 2px solid var(--ctp-surface1);
-      border-radius: 3px;
-      margin-right: 5px;
-      position: relative;
-      cursor: pointer;
-      background-color: var(--ctp-crust);
+      appearance: none; width: 16px; height: 16px; border: 2px solid var(--ctp-surface1); border-radius: 3px;
+      margin-right: 5px; position: relative; cursor: pointer; background-color: var(--ctp-crust); vertical-align: middle;
     }
-
-    input[type="radio"] {
-      border-radius: 50%;
-      /* Make radio buttons circular */
-    }
-
-    input[type="radio"]:checked,
-    input[type="checkbox"]:checked {
-      border-color: var(--ctp-blue);
-      background-color: var(--ctp-blue);
-    }
-
-    input[type="radio"]:checked::before {
-      content: '';
-      display: block;
-      width: 8px;
-      height: 8px;
-      background-color: var(--ctp-crust);
-      border-radius: 50%;
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-    }
-
+    input[type="checkbox"]:checked { border-color: var(--ctp-blue); background-color: var(--ctp-blue); }
     input[type="checkbox"]:checked::before {
-      content: '\2713';
-      /* Checkmark character */
-      display: block;
-      color: var(--ctp-crust);
-      font-size: 12px;
-      line-height: 1;
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
+      content: '\2713'; display: block; color: var(--ctp-crust); font-size: 12px; line-height: 1;
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
     }
 
-    /* Adjust spacing for common buttons */
-    .common-buttons {
-      display: flex;
-      gap: 10px;
-      /* Space between buttons */
-      margin-top: 10px;
-      margin-bottom: 10px;
-    }
-
-    #add-rule-form .add-rule-button {
-      margin-top: auto; /* Push to the bottom */
-      background-color: var(--ctp-green);
-    }
-
-    #add-rule-form .add-rule-button:hover {
-      background-color: var(--ctp-teal);
-    }
-      background-color: var(--ctp-sapphire);
-    }
-
-    button.delete-button {
-      background-color: var(--ctp-red);
-    }
-
-    button.delete-button:hover {
-      background-color: var(--ctp-maroon);
-    }
-
-    /* Tab styles */
-    .tabs {
-      display: inline-flex;
-      margin-bottom: 0;
-      border-bottom: 2px solid var(--ctp-surface1); /* Line under tabs */
-    }
-
+    .tabs { display: inline-flex; margin-bottom: 0; border-bottom: 2px solid var(--ctp-surface1); }
     .tab-button {
-      background-color: var(--ctp-mantle); /* Inactive background */
-      color: var(--ctp-blue); /* Inactive text color (previous active color) */
-      border: none;
-      padding: 10px 15px;
-      cursor: pointer;
-      transition: background-color 0.2s ease, color 0.2s ease;
-      border-radius: 5px 5px 0 0;
-      margin-right: 5px;
+      background-color: var(--ctp-mantle); color: var(--ctp-blue); border: none; padding: 10px 15px; cursor: pointer;
+      border-radius: 5px 5px 0 0; margin-right: 5px;
     }
-
-    .tab-button:hover {
-      background-color: var(--ctp-surface1);
-      color: var(--ctp-text);
-    }
-
-    .tab-button.active {
-      background-color: var(--ctp-mauve); /* Highlight color for active */
-      color: var(--ctp-crust); /* Text color for active */
-      border-bottom: 2px solid var(--ctp-blue); /* Apply border to active tab */
-      margin-bottom: 0; /* Remove negative margin */
-    }
-
+    .tab-button:hover { background-color: var(--ctp-surface1); color: var(--ctp-text); }
+    .tab-button.active { background-color: var(--ctp-mauve); color: var(--ctp-crust); }
     .rule-form {
-      flex: 0 0 14.0em; /* Don't grow, don't shrink, fixed width in em */
-      height: 28em; /* Fixed height in em */
-      padding: 15px;
-      border: 1px solid var(--ctp-surface1);
-      border-radius: 8px;
-      background-color: var(--ctp-crust);
-      display: flex;
-      flex-direction: column;
+      flex: 0 0 15em; padding: 15px; border: 1px solid var(--ctp-surface1); border-radius: 8px;
+      background-color: var(--ctp-crust); display: flex; flex-direction: column;
     }
+    .rules-table { flex: 1; min-width: 400px; background-color: var(--ctp-crust); }
 
-    .rules-table {
-      flex: 1; /* Allow to grow */
-      min-width: 400px; /* Minimum width for the table */
-      background-color: var(--ctp-crust);
+    .token-reveal {
+      background-color: var(--ctp-crust); border: 1px solid var(--ctp-green); border-radius: 8px; padding: 12px 14px; margin: 10px 0;
+      display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
     }
+    .token-reveal code { word-break: break-all; background-color: var(--ctp-surface0); }
 
-    .top-actions {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 12px;
+    .toaster-notification {
+      position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background-color: var(--ctp-green);
+      color: var(--ctp-crust); padding: 10px 20px; border-radius: 5px; opacity: 0; transition: opacity 0.4s ease-in-out;
+      z-index: 1000; pointer-events: none; max-width: 80vw;
     }
+    .toaster-notification.show { opacity: 1; }
 
     .auth-overlay {
-      position: fixed;
-      inset: 0;
-      background-color: rgba(17, 17, 27, 0.92);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      z-index: 2000;
+      position: fixed; inset: 0; background-color: rgba(17, 17, 27, 0.92); display: flex; align-items: center;
+      justify-content: center; z-index: 2000;
     }
-
     .auth-card {
-      width: 100%;
-      max-width: 360px;
-      padding: 24px;
-      border: 1px solid var(--ctp-surface1);
-      border-radius: 10px;
-      background-color: var(--ctp-mantle);
-      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+      width: 100%; max-width: 360px; padding: 24px; border: 1px solid var(--ctp-surface1); border-radius: 10px;
+      background-color: var(--ctp-mantle); box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
     }
-
-    .auth-card h2 {
-      margin-top: 0;
-      margin-bottom: 14px;
-    }
-
-    .auth-error {
-      margin-top: 10px;
-      color: var(--ctp-red);
-      min-height: 1.2em;
-    }
-
-    .admin-shell {
-      opacity: 0.45;
-      pointer-events: none;
-      transition: opacity 0.2s ease;
-    }
-
-    .admin-shell.authenticated {
-      opacity: 1;
-      pointer-events: auto;
-    }
+    .auth-card h2 { margin-top: 0; margin-bottom: 14px; }
+    .auth-card input { width: 100%; }
+    .auth-error { margin-top: 10px; color: var(--ctp-red); min-height: 1.2em; }
+    .admin-shell { opacity: 0.45; pointer-events: none; transition: opacity 0.2s ease; }
+    .admin-shell.authenticated { opacity: 1; pointer-events: auto; }
+    .nickname { cursor: pointer; border-bottom: 1px dotted var(--ctp-overlay0); }
   </style>
 </head>
 
 <body>
   <div id="auth-overlay" class="auth-overlay">
     <form id="login-form" class="auth-card">
-      <h2>Admin Sign In</h2>
+      <h2>Operator Sign In</h2>
       <div class="form-group">
         <label for="login-username">Username</label>
         <input id="login-username" class="catppuccin-input" type="text" autocomplete="username" required>
@@ -375,141 +197,354 @@
         <label for="login-password">Password</label>
         <input id="login-password" class="catppuccin-input" type="password" autocomplete="current-password" required>
       </div>
-      <button type="submit" class="catppuccin-button">Sign In</button>
+      <button type="submit">Sign In</button>
       <div id="auth-error" class="auth-error"></div>
     </form>
   </div>
 
   <div id="admin-shell" class="admin-shell">
-  <div class="top-actions">
-    <h1>rootlessRelay Admin</h1>
-    <button id="logout-button" type="button" class="catppuccin-button">Logout</button>
-  </div>
-  <h2>Connected Clients</h2>
-  <table id="sessions">
-    <thead>
-      <tr>
-        <th>Session ID</th>
-        <th>Client IP</th>
-        <th>VM IP</th>
-        <th>VM MAC</th>
-        <th>Bytes Sent</th>
-        <th>Bytes Received</th>
-      </tr>
-    </thead>
-    <tbody>
-    </tbody>
-  </table>
+    <div class="top-actions">
+      <div class="right">
+        <h1>rootlessRelay Admin</h1>
+        <span id="mode-badge" class="badge">…</span>
+      </div>
+      <div class="right">
+        <span id="whoami" class="muted"></span>
+        <button id="logout-button" type="button" class="secondary">Logout</button>
+      </div>
+    </div>
 
-  <h2>Reverse Proxy Rules</h2>
-  <div
-    style="background-color: var(--ctp-mantle); padding: 20px; border-radius: 8px; display: flex; gap: 20px; align-items: flex-start;">
-    <form id="add-rule-form" class="rule-form">
-      <div class="tabs">
-        <button type="button" class="tab-button active" data-proxy-type="http">HTTP Proxy</button>
-        <button type="button" class="tab-button" data-proxy-type="port">Port Forward</button>
+    <div class="cards" id="overview-cards">
+      <div class="card"><div class="label">Sessions</div><div class="value" id="card-sessions">0</div></div>
+      <div class="card"><div class="label">Anonymous</div><div class="value" id="card-anon">0</div></div>
+      <div class="card"><div class="label">Accounts</div><div class="value" id="card-users">0</div></div>
+      <div class="card"><div class="label">Sent to VMs</div><div class="value" id="card-sent">0 B</div></div>
+      <div class="card"><div class="label">Received from VMs</div><div class="value" id="card-received">0 B</div></div>
+      <div class="card"><div class="label">Egress denied</div><div class="value" id="card-denied">0</div></div>
+    </div>
+
+    <div class="section-tabs" id="section-tabs">
+      <button type="button" class="section-tab active" data-section="sessions">Sessions</button>
+      <button type="button" class="section-tab" data-section="users">Users &amp; Tokens</button>
+      <button type="button" class="section-tab" data-section="audit">Audit Log</button>
+      <button type="button" class="section-tab" data-section="rules" id="rules-tab">Inbound Rules</button>
+    </div>
+
+    <!-- Sessions -->
+    <section id="section-sessions" class="panel">
+      <h2>Connected Clients</h2>
+      <table id="sessions">
+        <thead>
+          <tr>
+            <th>Session</th>
+            <th>Owner</th>
+            <th>Tier</th>
+            <th>Client IP</th>
+            <th>VM IP</th>
+            <th>VM MAC</th>
+            <th>TCP</th>
+            <th>Sent</th>
+            <th>Received</th>
+            <th>Denied</th>
+            <th>Started</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id="sessions-empty" class="empty hidden">No connected clients.</div>
+    </section>
+
+    <!-- Users -->
+    <section id="section-users" class="panel hidden">
+      <h2>Users &amp; API Tokens</h2>
+      <form id="create-user-form" class="toolbar">
+        <div class="form-group">
+          <label for="new-username">Username</label>
+          <input id="new-username" class="catppuccin-input" type="text" required autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label for="new-password">Password <span class="muted">(optional for token-only users)</span></label>
+          <input id="new-password" class="catppuccin-input" type="password" autocomplete="new-password">
+        </div>
+        <div class="form-group">
+          <label for="new-role">Role</label>
+          <select id="new-role" class="catppuccin-input">
+            <option value="user">user</option>
+            <option value="operator">operator</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="new-tier">Tier</label>
+          <select id="new-tier" class="catppuccin-input"></select>
+        </div>
+        <div class="form-group">
+          <label>&nbsp;</label>
+          <button type="submit" class="success">Create user</button>
+        </div>
+      </form>
+      <div id="token-reveal" class="token-reveal hidden">
+        <strong>New API token (shown once):</strong>
+        <code id="token-reveal-value"></code>
+        <button type="button" class="small" id="token-reveal-copy">Copy</button>
+        <button type="button" class="small secondary" id="token-reveal-dismiss">Dismiss</button>
       </div>
-      <div id="tab-content">
-      <div id="http-fields">
+      <table id="users">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Username</th>
+            <th>Role</th>
+            <th>Tier</th>
+            <th>Status</th>
+            <th>Auth</th>
+            <th>Created</th>
+            <th>Last login</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id="users-empty" class="empty hidden">No users yet.</div>
+    </section>
+
+    <!-- Audit -->
+    <section id="section-audit" class="panel hidden">
+      <h2>Connection Audit Log</h2>
+      <form id="audit-filters" class="toolbar">
         <div class="form-group">
-          <label for="vm">&nbsp;</label>
-          <select id="vm"></select>
+          <label for="audit-owner">Owner</label>
+          <input id="audit-owner" class="catppuccin-input" type="text" placeholder="user:7 or anon:…">
         </div>
         <div class="form-group">
-          <label for="port">VM Port:</label>
-          <input type="text" id="port" class="catppuccin-input" placeholder="e.g., 80">
+          <label for="audit-verdict">Verdict</label>
+          <select id="audit-verdict" class="catppuccin-input">
+            <option value="">any</option>
+            <option value="allow">allow</option>
+            <option value="deny">deny</option>
+          </select>
         </div>
         <div class="form-group">
-          <label for="path">Path:</label>
-          <input type="text" id="path" class="catppuccin-input" placeholder="e.g., /">
+          <label for="audit-since">Since</label>
+          <select id="audit-since" class="catppuccin-input">
+            <option value="1">last hour</option>
+            <option value="24" selected>last 24 hours</option>
+            <option value="168">last 7 days</option>
+            <option value="720">last 30 days</option>
+          </select>
         </div>
         <div class="form-group">
-          <label for="targetPath">Target Path:</label>
-          <input type="text" id="targetPath" class="catppuccin-input" placeholder="e.g., /app">
-          <span class="optional-text">optional</span>
+          <label for="audit-limit">Rows</label>
+          <select id="audit-limit" class="catppuccin-input">
+            <option value="100">100</option>
+            <option value="200" selected>200</option>
+            <option value="500">500</option>
+            <option value="1000">1000</option>
+          </select>
         </div>
         <div class="form-group">
-          <label for="vhost">VHost:</label>
-          <input type="text" id="vhost" class="catppuccin-input" placeholder="e.g., domain.com">
-          <span class="optional-text">optional</span>
+          <label>&nbsp;</label>
+          <button type="submit">Search</button>
         </div>
-      </div>
-      <div id="port-fields" style="display: none;">
-        <div class="form-group">
-          <label style="visibility: hidden;">Protocol(s):</label>
-          <div>
-            <label><input type="checkbox" name="protocol" value="tcp" checked> TCP</label>
-            <label><input type="checkbox" name="protocol" value="udp" checked> UDP</label>
+      </form>
+      <div id="audit-disabled" class="empty hidden">The audit log is disabled (AUDIT_ENABLED=false).</div>
+      <table id="audit">
+        <thead>
+          <tr>
+            <th>Started</th>
+            <th>Owner</th>
+            <th>Session</th>
+            <th>Proto</th>
+            <th>Destination</th>
+            <th>Verdict</th>
+            <th>In</th>
+            <th>Out</th>
+            <th>Duration</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id="audit-empty" class="empty hidden">No matching rows.</div>
+    </section>
+
+    <!-- Rules -->
+    <section id="section-rules" class="panel hidden">
+      <h2>Inbound Rules (reverse proxy and port forwards)</h2>
+      <div id="rules-disabled" class="empty hidden">Inbound rules are disabled on this relay (INBOUND_RULES_ENABLED=false).</div>
+      <div id="rules-body" class="row">
+        <form id="add-rule-form" class="rule-form">
+          <div class="tabs">
+            <button type="button" class="tab-button active" data-proxy-type="http">HTTP Proxy</button>
+            <button type="button" class="tab-button" data-proxy-type="port">Port Forward</button>
           </div>
-        </div>
-        <div class="form-group">
-          <label for="host_port">Local Port:</label>
-          <input type="text" id="host_port" class="catppuccin-input" placeholder="e.g., 4445">
-        </div>
-        <div class="form-group">
-          <label for="bind_address">Bind Address:</label>
-          <input type="text" id="bind_address" class="catppuccin-input" value="0.0.0.0" placeholder="e.g., 0.0.0.0 or 127.0.0.1">
-          <span class="optional-text">0.0.0.0 for any interface</span>
-        </div>
-        <div class="form-group">
-          <label for="vm-port">VM:</label>
-          <select id="vm-port"></select>
-        </div>
-        <div class="form-group">
-          <label for="port-port">Remote Port:</label>
-          <input type="text" id="port-port" class="catppuccin-input" placeholder="e.g., 80">
-        </div>
+          <div id="http-fields">
+            <div class="form-group">
+              <label for="vm">VM</label>
+              <select id="vm" class="catppuccin-input"></select>
+            </div>
+            <div class="form-group">
+              <label for="port">VM Port</label>
+              <input type="text" id="port" class="catppuccin-input" placeholder="e.g., 80">
+            </div>
+            <div class="form-group">
+              <label for="path">Path</label>
+              <input type="text" id="path" class="catppuccin-input" placeholder="e.g., /">
+            </div>
+            <div class="form-group">
+              <label for="targetPath">Target Path</label>
+              <input type="text" id="targetPath" class="catppuccin-input" placeholder="e.g., /app">
+              <span class="optional-text">optional</span>
+            </div>
+            <div class="form-group">
+              <label for="vhost">VHost</label>
+              <input type="text" id="vhost" class="catppuccin-input" placeholder="e.g., domain.com">
+              <span class="optional-text">optional</span>
+            </div>
+          </div>
+          <div id="port-fields" class="hidden">
+            <div class="form-group">
+              <label>Protocols</label>
+              <div>
+                <label><input type="checkbox" name="protocol" value="tcp" checked> TCP</label>
+                <label><input type="checkbox" name="protocol" value="udp" checked> UDP</label>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="host_port">Local Port</label>
+              <input type="text" id="host_port" class="catppuccin-input" placeholder="e.g., 4445">
+            </div>
+            <div class="form-group">
+              <label for="bind_address">Bind Address</label>
+              <input type="text" id="bind_address" class="catppuccin-input" value="0.0.0.0">
+              <span class="optional-text">0.0.0.0 for any interface</span>
+            </div>
+            <div class="form-group">
+              <label for="vm-port">VM</label>
+              <select id="vm-port" class="catppuccin-input"></select>
+            </div>
+            <div class="form-group">
+              <label for="port-port">Remote Port</label>
+              <input type="text" id="port-port" class="catppuccin-input" placeholder="e.g., 80">
+            </div>
+          </div>
+          <button type="submit" class="success" style="margin-top: auto;">Add Rule</button>
+        </form>
+        <table id="rules" class="rules-table">
+          <thead>
+            <tr>
+              <th>Type</th>
+              <th>Source</th>
+              <th>Destination</th>
+              <th>Test</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
       </div>
-      </div> <!-- Close tab-content -->
-      <button type="submit" class="add-rule-button">Add Rule</button>
-    </form>
-    <div style="border-left: 1px solid var(--ctp-surface1);"></div> <!-- Divider -->
-    <table id="rules" class="rules-table">
-      <thead>
-        <tr>
-          <th>Type</th>
-          <th>Source</th>
-          <th>Destination</th>
-          <th>Test</th>
-          <th>Action&nbsp;</th>
-        </tr>
-      </thead>
-      <tbody>
-      </tbody>
-    </table>
-  </div>
-  <div class="common-buttons" style="margin-top: 20px;">
-    <button type="button" onclick="addSshPortForward()">Add SSH (2222 -> VM:22)</button>
-    <button type="button" onclick="addHttpPortForward()">Add HTTP (8888 -> VM:80)</button>
-  </div>
-  </div>
+      <div class="actions" style="margin-top: 14px;">
+        <button type="button" id="quick-ssh" class="secondary">Add SSH (2222 → VM:22)</button>
+        <button type="button" id="quick-http" class="secondary">Add HTTP (/ → VM:80)</button>
+      </div>
+    </section>
   </div>
 
   <div id="toaster-notification" class="toaster-notification"></div>
 
   <script>
-    const PROXY_PORT = 8080;
-    let sessionPollIntervalId = null;
+    'use strict';
 
-    const authOverlay = document.getElementById('auth-overlay');
-    const adminShell = document.getElementById('admin-shell');
-    const loginForm = document.getElementById('login-form');
-    const authError = document.getElementById('auth-error');
-    const logoutButton = document.getElementById('logout-button');
+    // ---------- helpers -------------------------------------------------------
 
-    function setAuthenticatedState(isAuthenticated) {
-      if (isAuthenticated) {
-        authOverlay.style.display = 'none';
-        adminShell.classList.add('authenticated');
-      } else {
-        authOverlay.style.display = 'flex';
-        adminShell.classList.remove('authenticated');
-        document.querySelector('#sessions tbody').innerHTML = '';
-        document.querySelector('#rules tbody').innerHTML = '';
-        if (sessionPollIntervalId) {
-          clearInterval(sessionPollIntervalId);
-          sessionPollIntervalId = null;
-        }
+    const $ = (selector) => document.querySelector(selector);
+    const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+
+    // Build DOM nodes from data without ever interpolating into HTML.
+    function el(tag, attrs = {}, children = []) {
+      const node = document.createElement(tag);
+      for (const [key, value] of Object.entries(attrs)) {
+        if (value === undefined || value === null || value === false) continue;
+        if (key === 'class') node.className = value;
+        else if (key === 'text') node.textContent = value;
+        else if (key.startsWith('data-')) node.setAttribute(key, value);
+        else if (key === 'href' || key === 'target' || key === 'title' || key === 'type' || key === 'value' || key === 'placeholder') node.setAttribute(key, value);
+        else node[key] = value;
+      }
+      for (const child of [].concat(children)) {
+        if (child === null || child === undefined) continue;
+        node.appendChild(typeof child === 'string' ? document.createTextNode(child) : child);
+      }
+      return node;
+    }
+
+    function formatBytes(value) {
+      const n = Number(value) || 0;
+      if (n < 1024) return `${n} B`;
+      const units = ['KiB', 'MiB', 'GiB', 'TiB'];
+      let v = n / 1024;
+      let i = 0;
+      while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+      return `${v.toFixed(v < 10 ? 2 : 1)} ${units[i]}`;
+    }
+
+    function formatTime(value) {
+      if (!value) return '';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return String(value);
+      return date.toLocaleString();
+    }
+
+    function formatDuration(startedAt, endedAt) {
+      if (!startedAt) return '';
+      if (!endedAt) return 'open';
+      const ms = Number(endedAt) - Number(startedAt);
+      if (ms < 1000) return `${ms} ms`;
+      if (ms < 60000) return `${(ms / 1000).toFixed(1)} s`;
+      return `${Math.round(ms / 60000)} min`;
+    }
+
+    function badge(text, kind) {
+      return el('span', { class: `badge ${kind || ''}`, text });
+    }
+
+    function showToaster(message, isError = false) {
+      const toaster = $('#toaster-notification');
+      toaster.textContent = message;
+      toaster.style.backgroundColor = isError ? 'var(--ctp-red)' : 'var(--ctp-green)';
+      toaster.classList.add('show');
+      clearTimeout(showToaster.timer);
+      showToaster.timer = setTimeout(() => toaster.classList.remove('show'), 3500);
+    }
+
+    function copyToClipboard(text) {
+      navigator.clipboard.writeText(text).then(
+        () => showToaster('Copied to clipboard'),
+        (err) => showToaster(`Failed to copy: ${err}`, true),
+      );
+    }
+
+    function emptyState(tableSelector, emptySelector, isEmpty) {
+      $(tableSelector).classList.toggle('hidden', isEmpty);
+      $(emptySelector).classList.toggle('hidden', !isEmpty);
+    }
+
+    // ---------- auth ----------------------------------------------------------
+
+    const authOverlay = $('#auth-overlay');
+    const adminShell = $('#admin-shell');
+    const loginForm = $('#login-form');
+    const authError = $('#auth-error');
+    let pollTimer = null;
+    let config = { mode: 'local', inboundRulesEnabled: true, proxyPort: 8080, tiers: [] };
+
+    function setAuthenticatedState(isAuthenticated, username = '') {
+      authOverlay.style.display = isAuthenticated ? 'none' : 'flex';
+      adminShell.classList.toggle('authenticated', isAuthenticated);
+      $('#whoami').textContent = isAuthenticated && username ? `signed in as ${username}` : '';
+      if (!isAuthenticated) {
+        for (const selector of ['#sessions tbody', '#users tbody', '#audit tbody', '#rules tbody']) $(selector).innerHTML = '';
+        clearInterval(pollTimer);
+        pollTimer = null;
       }
     }
 
@@ -522,379 +557,585 @@
       return response;
     }
 
-    async function checkAuthStatus() {
-      try {
-        const response = await fetch('/api/auth/status');
-        const status = await response.json();
-        return Boolean(status.authenticated);
-      } catch (err) {
-        return false;
+    async function apiJson(url, options = {}) {
+      const response = await apiFetch(url, options);
+      let payload = null;
+      try { payload = await response.json(); } catch (_error) { payload = null; }
+      if (!response.ok) {
+        const message = (payload && payload.error) || `${response.status} ${response.statusText}`;
+        throw new Error(message);
       }
+      return payload;
     }
 
-    function startPolling() {
-      if (!sessionPollIntervalId) {
-        sessionPollIntervalId = setInterval(() => {
-          fetchSessions().catch(() => {});
-        }, 5000);
-      }
-      fetchSessions().catch(() => {});
-      loadRules().catch(() => {});
+    function postJson(url, body, method = 'POST') {
+      return apiJson(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     }
 
     loginForm.addEventListener('submit', async (event) => {
       event.preventDefault();
       authError.textContent = '';
-
-      const username = document.getElementById('login-username').value.trim();
-      const password = document.getElementById('login-password').value;
-
+      const username = $('#login-username').value.trim();
+      const password = $('#login-password').value;
       try {
         const response = await fetch('/api/login', {
           method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({username, password}),
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
         });
-
         if (!response.ok) {
-          const payload = await response.json().catch(() => ({error: 'Login failed'}));
+          const payload = await response.json().catch(() => ({ error: 'Login failed' }));
           authError.textContent = payload.error || 'Login failed';
           return;
         }
-
         loginForm.reset();
-        setAuthenticatedState(true);
-        startPolling();
-      } catch (err) {
+        await start(username);
+      } catch (_error) {
         authError.textContent = 'Login request failed';
       }
     });
 
-    logoutButton.addEventListener('click', async () => {
-      try {
-        await fetch('/api/logout', {
-          method: 'POST',
-        });
-      } finally {
-        setAuthenticatedState(false);
-      }
+    $('#logout-button').addEventListener('click', async () => {
+      try { await fetch('/api/logout', { method: 'POST' }); } finally { setAuthenticatedState(false); }
     });
+
+    // ---------- sections ------------------------------------------------------
+
+    let activeSection = 'sessions';
+    $('#section-tabs').addEventListener('click', (event) => {
+      const button = event.target.closest('.section-tab');
+      if (!button) return;
+      showSection(button.dataset.section);
+    });
+
+    function showSection(name) {
+      activeSection = name;
+      $$('.section-tab').forEach((tab) => tab.classList.toggle('active', tab.dataset.section === name));
+      for (const section of ['sessions', 'users', 'audit', 'rules']) {
+        $(`#section-${section}`).classList.toggle('hidden', section !== name);
+      }
+      const loaders = { sessions: fetchSessions, users: loadUsers, audit: loadAudit, rules: loadRules };
+      loaders[name]().catch((error) => showToaster(error.message, true));
+    }
+
+    async function loadConfig() {
+      config = await apiJson('/api/config');
+      const badgeEl = $('#mode-badge');
+      badgeEl.textContent = `${config.mode} mode`;
+      badgeEl.className = `badge ${config.mode}`;
+      const tierSelect = $('#new-tier');
+      tierSelect.innerHTML = '';
+      tierSelect.appendChild(el('option', { value: '', text: 'default for role' }));
+      for (const tier of config.tiers || []) tierSelect.appendChild(el('option', { value: tier, text: tier }));
+      $('#rules-disabled').classList.toggle('hidden', config.inboundRulesEnabled);
+      $('#rules-body').classList.toggle('hidden', !config.inboundRulesEnabled);
+      $('#quick-ssh').disabled = !config.inboundRulesEnabled;
+      $('#quick-http').disabled = !config.inboundRulesEnabled;
+    }
+
+    async function start(username) {
+      setAuthenticatedState(true, username);
+      await loadConfig();
+      showSection(activeSection);
+      if (!pollTimer) {
+        pollTimer = setInterval(() => {
+          fetchSessions().catch(() => {});
+        }, 5000);
+      }
+    }
+
+    // ---------- sessions ------------------------------------------------------
+
+    const vmSelects = () => [$('#vm'), $('#vm-port')];
 
     async function fetchSessions() {
-      const response = await apiFetch('/api/sessions');
-      const sessions = await response.json();
-      const tbody = document.querySelector('#sessions tbody');
-      const vmDropdownHttp = document.getElementById('vm');
-      const vmDropdownPort = document.getElementById('vm-port');
-      const selectedVmHttp = vmDropdownHttp.value;
-      const selectedVmPort = vmDropdownPort.value;
+      const sessions = await apiJson('/api/sessions');
+      const tbody = $('#sessions tbody');
+      const selected = vmSelects().map((select) => select.value);
+      const editing = tbody.querySelector('input.nickname-input');
+      if (editing) return; // do not clobber an in-progress edit
 
-      // Store current nickname input values to restore later
-      const currentNicknameInputs = new Map();
-      tbody.querySelectorAll('input[id^="new-nickname-input-"]').forEach(input => {
-        currentNicknameInputs.set(input.id, input.value);
-      });
+      tbody.innerHTML = '';
+      for (const select of vmSelects()) {
+        select.innerHTML = '';
+        select.appendChild(el('option', { value: '', text: 'Select VM' }));
+      }
 
-      tbody.innerHTML = ''; // Clear and re-render the table structure
-      vmDropdownHttp.innerHTML = '<option value="">Select VM</option>';
-      vmDropdownPort.innerHTML = '<option value="">Select VM</option>';
-
+      let anon = 0;
+      let sent = 0;
+      let received = 0;
+      let denied = 0;
+      const owners = new Set();
       for (const session of sessions) {
-        if (session.vmIP) { // Only add VMs with assigned IPs
-          const row = document.createElement('tr');
-          row.innerHTML = `
-            <td>
-              <span id="display-nickname-${session.sessionId}" onclick="editNickname('${session.sessionId}', '${session.nickname || ''}')" style="cursor: pointer;">${session.nickname || session.sessionId}</span>
-            </td>
-            <td>${session.clientIP}</td>
-            <td>${session.vmIP}</td>
-            <td>${session.vmMAC}</td>
-            <td>${session.bytesSent}</td>
-            <td>${session.bytesReceived}</td>
-          `;
-          tbody.appendChild(row);
+        sent += session.bytesSent || 0;
+        received += session.bytesReceived || 0;
+        denied += (session.policy && session.policy.egressDenied) || 0;
+        if (session.kind === 'anon') anon += 1;
+        if (session.userId) owners.add(session.userId);
 
-          // Restore input value if it was being typed in
-          const inputId = `new-nickname-input-${session.sessionId}`;
-          if (currentNicknameInputs.has(inputId)) {
-            document.getElementById(inputId).value = currentNicknameInputs.get(inputId);
+        const ownerLabel = session.username || session.owner || '';
+        const row = el('tr', {}, [
+          el('td', {}, [
+            el('span', { class: 'nickname', title: session.sessionId, text: session.nickname || session.sessionId.slice(0, 8), 'data-session': session.sessionId, 'data-nickname': session.nickname || '' }),
+          ]),
+          el('td', { text: ownerLabel }),
+          el('td', {}, [badge(session.tier || 'local', session.kind || 'local')]),
+          el('td', { class: 'mono', text: session.clientIP || '' }),
+          el('td', { class: 'mono', text: session.vmIP || '—' }),
+          el('td', { class: 'mono', text: session.vmMAC || '' }),
+          el('td', { class: 'num', text: String(session.tcpConnections ?? '') }),
+          el('td', { class: 'num', text: formatBytes(session.bytesSent) }),
+          el('td', { class: 'num', text: formatBytes(session.bytesReceived) }),
+          el('td', { class: 'num', text: String((session.policy && session.policy.egressDenied) || 0) }),
+          el('td', { text: formatTime(session.startedAt) }),
+          el('td', {}, [el('div', { class: 'actions' }, [
+            el('button', { type: 'button', class: 'small danger', text: 'Kill', 'data-action': 'kill', 'data-session': session.sessionId }),
+          ])]),
+        ]);
+        tbody.appendChild(row);
+
+        if (session.vmIP) {
+          for (const select of vmSelects()) {
+            select.appendChild(el('option', { value: session.vmIP, text: session.nickname ? `${session.nickname} (${session.vmIP})` : session.vmIP }));
           }
-
-          const optionHttp = document.createElement('option');
-          optionHttp.value = session.vmIP;
-          optionHttp.textContent = `${session.nickname || session.vmIP}`;
-          vmDropdownHttp.appendChild(optionHttp);
-
-          const optionPort = document.createElement('option');
-          optionPort.value = session.vmIP;
-          optionPort.textContent = `${session.nickname || session.vmIP}`;
-          vmDropdownPort.appendChild(optionPort);
         }
       }
-      vmDropdownHttp.value = selectedVmHttp;
-      vmDropdownPort.value = selectedVmPort;
-    }
-    const httpFields = document.getElementById('http-fields');
-    const portFields = document.getElementById('port-fields');
-    const tabButtons = document.querySelectorAll('.tab-button');
-    let currentProxyType = 'http'; // Default active tab
+      vmSelects().forEach((select, index) => { select.value = selected[index]; });
+      emptyState('#sessions', '#sessions-empty', sessions.length === 0);
 
-    function switchTab(proxyType) {
-      tabButtons.forEach(button => {
-        if (button.dataset.proxyType === proxyType) {
-          button.classList.add('active');
-        } else {
-          button.classList.remove('active');
-        }
-      });
-
-      if (proxyType === 'port') {
-        httpFields.style.display = 'none';
-        portFields.style.display = 'block';
-      } else {
-        httpFields.style.display = 'block';
-        portFields.style.display = 'none';
-      }
-      currentProxyType = proxyType;
+      $('#card-sessions').textContent = String(sessions.length);
+      $('#card-anon').textContent = String(anon);
+      $('#card-users').textContent = String(owners.size);
+      $('#card-sent').textContent = formatBytes(sent);
+      $('#card-received').textContent = formatBytes(received);
+      $('#card-denied').textContent = String(denied);
     }
 
-    tabButtons.forEach(button => {
-      button.addEventListener('click', () => {
-        switchTab(button.dataset.proxyType);
-      });
-    });
-
-    // Initialize tab display
-    switchTab(currentProxyType);
-
-    document.getElementById('add-rule-form').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const proxyType = currentProxyType;
-      let rule;
-
-      let selectedVm;
-      if (proxyType === 'port') {
-        selectedVm = document.getElementById('vm-port').value;
-      } else { // http
-        selectedVm = document.getElementById('vm').value;
-      }
-
-      if (!selectedVm) {
-        showToaster('Please select an active VM.', true);
+    $('#sessions').addEventListener('click', async (event) => {
+      const nickname = event.target.closest('.nickname');
+      if (nickname) {
+        editNickname(nickname);
         return;
       }
-
-      if (proxyType === 'port') {
-        const protocols = Array.from(document.querySelectorAll('input[name="protocol"]:checked')).map(cb => cb.value);
-        if (protocols.length === 0) {
-          alert('Please select at least one protocol (TCP or UDP).');
-          return;
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      if (button.dataset.action === 'kill') {
+        try {
+          await apiFetch(`/api/sessions/${encodeURIComponent(button.dataset.session)}`, { method: 'DELETE' });
+          showToaster('Session terminated');
+          await fetchSessions();
+        } catch (error) {
+          showToaster(error.message, true);
         }
-        const hostPort = parseInt(document.getElementById('host_port').value);
-
-        // Fetch existing rules to check for duplicates
-        const existingRulesResponse = await apiFetch('/api/rules');
-        const existingRules = await existingRulesResponse.json();
-
-        const isDuplicatePort = existingRules.some(rule =>
-          rule.type === 'port' && rule.host_port === hostPort
-        );
-
-        if (isDuplicatePort) {
-          showToaster(`A port forward rule already exists for local port ${hostPort}.`, true);
-          return;
-        }
-
-        rule = {
-          type: 'port',
-          protocols: protocols, // e.g., ['tcp'], ['udp'], or ['tcp', 'udp']
-          vm: document.getElementById('vm-port').value,
-          port: parseInt(document.getElementById('port-port').value),
-          host_port: hostPort,
-          bind_address: document.getElementById('bind_address').value,
-        };
-      } else { // http
-        rule = {
-          type: 'http',
-          vm: document.getElementById('vm').value,
-          port: parseInt(document.getElementById('port').value),
-          vhost: document.getElementById('vhost').value,
-          path: document.getElementById('path').value,
-          targetPath: document.getElementById('targetPath').value,
-        };
       }
-
-      await apiFetch('/api/rules', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(rule),
-      });
-      loadRules();
     });
 
-    function showToaster(message, isError = false) {
-      const toaster = document.getElementById('toaster-notification');
-      toaster.textContent = message;
-      toaster.style.backgroundColor = isError ? 'var(--ctp-red)' : 'var(--ctp-green)'; // Red for error, green for success
-      toaster.style.color = 'var(--ctp-crust)';
-      toaster.classList.add('show');
-      setTimeout(() => {
-        toaster.classList.remove('show');
-      }, 3000);
+    function editNickname(span) {
+      const sessionId = span.dataset.session;
+      const input = el('input', { type: 'text', class: 'catppuccin-input nickname-input', value: span.dataset.nickname });
+      input.style.width = '10em';
+      span.replaceWith(input);
+      input.focus();
+      let done = false;
+      const save = async () => {
+        if (done) return;
+        done = true;
+        const value = input.value.trim();
+        try {
+          if (value) await postJson(`/api/sessions/${encodeURIComponent(sessionId)}/nickname`, { nickname: value });
+          else await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/nickname`, { method: 'DELETE' });
+        } catch (error) {
+          showToaster(error.message, true);
+        }
+        input.remove();
+        await fetchSessions();
+      };
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') { event.preventDefault(); save(); }
+        if (event.key === 'Escape') { done = true; input.remove(); fetchSessions(); }
+      });
+      input.addEventListener('blur', save);
     }
 
-    function copyToClipboard(text) {
-      navigator.clipboard.writeText(text).then(() => {
-        showToaster('Copied to clipboard!');
-      }, (err) => {
-        showToaster('Failed to copy: ' + err, true);
-      });
+    // ---------- users & tokens ------------------------------------------------
+
+    const expandedUsers = new Set();
+
+    function userActions(user) {
+      const buttons = [
+        el('button', { type: 'button', class: 'small', text: expandedUsers.has(user.id) ? 'Hide' : 'Details', 'data-action': 'toggle', 'data-user': user.id }),
+        el('button', { type: 'button', class: 'small success', text: 'New token', 'data-action': 'token', 'data-user': user.id }),
+      ];
+      if (user.status === 'banned') {
+        buttons.push(el('button', { type: 'button', class: 'small', text: 'Unban', 'data-action': 'unban', 'data-user': user.id }));
+      } else {
+        buttons.push(el('button', { type: 'button', class: 'small danger', text: 'Ban', 'data-action': 'ban', 'data-user': user.id }));
+      }
+      buttons.push(el('button', { type: 'button', class: 'small secondary', text: 'Tier', 'data-action': 'tier', 'data-user': user.id, 'data-tier': user.tier }));
+      buttons.push(el('button', { type: 'button', class: 'small secondary', text: 'Password', 'data-action': 'password', 'data-user': user.id }));
+      return el('div', { class: 'actions' }, buttons);
+    }
+
+    async function loadUsers() {
+      const users = await apiJson('/api/users');
+      const tbody = $('#users tbody');
+      tbody.innerHTML = '';
+      for (const user of users) {
+        tbody.appendChild(el('tr', {}, [
+          el('td', { class: 'num', text: String(user.id) }),
+          el('td', { text: user.username }),
+          el('td', {}, [badge(user.role, user.role)]),
+          el('td', { text: user.tier }),
+          el('td', {}, [badge(user.status, user.status)]),
+          el('td', { text: user.externalSub ? 'external' : (user.hasPassword ? 'password' : 'tokens only') }),
+          el('td', { text: formatTime(user.createdAt) }),
+          el('td', { text: formatTime(user.lastLoginAt) }),
+          el('td', {}, [userActions(user)]),
+        ]));
+        if (expandedUsers.has(user.id)) tbody.appendChild(await userDetailRow(user));
+      }
+      emptyState('#users', '#users-empty', users.length === 0);
+    }
+
+    async function userDetailRow(user) {
+      const [detail, usage] = await Promise.all([
+        apiJson(`/api/users/${user.id}`),
+        apiJson(`/api/usage/${user.id}`).catch(() => null),
+      ]);
+      const tokenRows = detail.tokens.map((token) => el('tr', {}, [
+        el('td', { class: 'mono', text: `rr_${token.prefix}_…` }),
+        el('td', { text: token.name }),
+        el('td', { text: formatTime(token.createdAt) }),
+        el('td', { text: formatTime(token.lastUsedAt) || 'never' }),
+        el('td', { text: token.expiresAt ? formatTime(token.expiresAt) : '—' }),
+        el('td', {}, [token.revokedAt
+          ? badge('revoked', 'banned')
+          : el('button', { type: 'button', class: 'small danger', text: 'Revoke', 'data-action': 'revoke', 'data-token': token.id, 'data-user': user.id })]),
+      ]));
+      const tokensTable = tokenRows.length
+        ? el('table', {}, [
+          el('thead', {}, [el('tr', {}, ['Token', 'Name', 'Created', 'Last used', 'Expires', ''].map((h) => el('th', { text: h })))]),
+          el('tbody', {}, tokenRows),
+        ])
+        : el('div', { class: 'empty', text: 'No API tokens.' });
+
+      const usageBlock = usage
+        ? el('div', {}, [
+          el('p', {}, [
+            'Current period: ',
+            el('strong', { text: formatBytes(usage.currentPeriodBytes) }),
+            usage.quotaBytes ? ` of ${formatBytes(usage.quotaBytes)} per ${usage.quotaPeriod}` : ' (no quota)',
+          ]),
+          usage.months.length
+            ? el('table', {}, [
+              el('thead', {}, [el('tr', {}, ['Month', 'From VM', 'To VM', 'Sessions'].map((h) => el('th', { text: h })))]),
+              el('tbody', {}, usage.months.map((m) => el('tr', {}, [
+                el('td', { text: m.month }),
+                el('td', { class: 'num', text: formatBytes(m.bytesIn) }),
+                el('td', { class: 'num', text: formatBytes(m.bytesOut) }),
+                el('td', { class: 'num', text: String(m.sessions) }),
+              ]))),
+            ])
+            : el('div', { class: 'empty', text: 'No usage recorded yet.' }),
+        ])
+        : el('div', { class: 'empty', text: 'Usage unavailable.' });
+
+      return el('tr', { class: 'detail-row' }, [
+        el('td', { colSpan: 9 }, [
+          el('div', { class: 'row' }, [
+            el('div', { style: 'flex: 2; min-width: 320px;' }, [el('h3', { text: 'API tokens' }), tokensTable]),
+            el('div', { style: 'flex: 1; min-width: 260px;' }, [el('h3', { text: 'Usage' }), usageBlock]),
+          ]),
+        ]),
+      ]);
+    }
+
+    function revealToken(token) {
+      $('#token-reveal-value').textContent = token;
+      $('#token-reveal').classList.remove('hidden');
+    }
+    $('#token-reveal-copy').addEventListener('click', () => copyToClipboard($('#token-reveal-value').textContent));
+    $('#token-reveal-dismiss').addEventListener('click', () => {
+      $('#token-reveal-value').textContent = '';
+      $('#token-reveal').classList.add('hidden');
+    });
+
+    $('#create-user-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const body = {
+        username: $('#new-username').value.trim(),
+        password: $('#new-password').value || undefined,
+        role: $('#new-role').value,
+        tier: $('#new-tier').value || undefined,
+      };
+      try {
+        const user = await postJson('/api/users', body);
+        showToaster(`User ${user.username} created`);
+        $('#create-user-form').reset();
+        await loadUsers();
+      } catch (error) {
+        showToaster(error.message, true);
+      }
+    });
+
+    $('#users').addEventListener('click', async (event) => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      const userId = button.dataset.user;
+      try {
+        switch (button.dataset.action) {
+          case 'toggle': {
+            const id = Number(userId);
+            if (expandedUsers.has(id)) expandedUsers.delete(id); else expandedUsers.add(id);
+            break;
+          }
+          case 'token': {
+            const name = window.prompt('Token name', 'default');
+            if (name === null) return;
+            const created = await postJson(`/api/users/${userId}/tokens`, { name });
+            revealToken(created.token);
+            expandedUsers.add(Number(userId));
+            break;
+          }
+          case 'revoke':
+            await apiFetch(`/api/tokens/${button.dataset.token}`, { method: 'DELETE' });
+            showToaster('Token revoked');
+            break;
+          case 'ban':
+            if (!window.confirm('Ban this user and terminate their sessions?')) return;
+            await postJson(`/api/users/${userId}/ban`, {});
+            showToaster('User banned');
+            break;
+          case 'unban':
+            await postJson(`/api/users/${userId}/unban`, {});
+            showToaster('User unbanned');
+            break;
+          case 'tier': {
+            const tier = window.prompt(`Tier (${(config.tiers || []).join(', ')})`, button.dataset.tier);
+            if (!tier) return;
+            await postJson(`/api/users/${userId}/tier`, { tier });
+            showToaster('Tier updated');
+            break;
+          }
+          case 'password': {
+            const password = window.prompt('New password (at least 8 characters)');
+            if (!password) return;
+            await postJson(`/api/users/${userId}/password`, { password });
+            showToaster('Password updated');
+            break;
+          }
+          default:
+            return;
+        }
+        await loadUsers();
+      } catch (error) {
+        showToaster(error.message, true);
+      }
+    });
+
+    // ---------- audit ---------------------------------------------------------
+
+    async function loadAudit() {
+      const params = new URLSearchParams();
+      const owner = $('#audit-owner').value.trim();
+      if (owner) params.set('owner', owner);
+      const verdict = $('#audit-verdict').value;
+      if (verdict) params.set('verdict', verdict);
+      const hours = Number($('#audit-since').value);
+      params.set('since', new Date(Date.now() - hours * 3600 * 1000).toISOString());
+      params.set('limit', $('#audit-limit').value);
+      const result = await apiJson(`/api/audit?${params.toString()}`);
+      $('#audit-disabled').classList.toggle('hidden', result.enabled);
+      const tbody = $('#audit tbody');
+      tbody.innerHTML = '';
+      for (const row of result.rows) {
+        const verdictKind = row.verdict.startsWith('deny') ? 'deny' : 'allow';
+        tbody.appendChild(el('tr', {}, [
+          el('td', { text: formatTime(row.startedAt) }),
+          el('td', { class: 'mono', text: row.owner }),
+          el('td', { class: 'mono', title: row.sessionId, text: row.sessionId.slice(0, 8) }),
+          el('td', { text: row.proto }),
+          el('td', { class: 'mono', text: `${row.dstIP}:${row.dstPort}` }),
+          el('td', {}, [badge(row.verdict, verdictKind)]),
+          el('td', { class: 'num', text: row.bytesIn === null ? '' : formatBytes(row.bytesIn) }),
+          el('td', { class: 'num', text: row.bytesOut === null ? '' : formatBytes(row.bytesOut) }),
+          el('td', { text: formatDuration(row.startedAt, row.endedAt) }),
+        ]));
+      }
+      emptyState('#audit', '#audit-empty', result.enabled && result.rows.length === 0);
+      if (!result.enabled) $('#audit').classList.add('hidden');
+    }
+
+    $('#audit-filters').addEventListener('submit', (event) => {
+      event.preventDefault();
+      loadAudit().catch((error) => showToaster(error.message, true));
+    });
+
+    // ---------- inbound rules -------------------------------------------------
+
+    let currentProxyType = 'http';
+    function switchTab(proxyType) {
+      $$('.tab-button').forEach((button) => button.classList.toggle('active', button.dataset.proxyType === proxyType));
+      $('#http-fields').classList.toggle('hidden', proxyType === 'port');
+      $('#port-fields').classList.toggle('hidden', proxyType !== 'port');
+      currentProxyType = proxyType;
+    }
+    $$('.tab-button').forEach((button) => button.addEventListener('click', () => switchTab(button.dataset.proxyType)));
+    switchTab(currentProxyType);
+
+    function copyButton(command) {
+      return el('button', { type: 'button', class: 'small', text: 'Copy', 'data-action': 'copy', 'data-command': command });
+    }
+
+    function testCell(rule) {
+      const proxyPort = config.proxyPort || 8080;
+      const parts = [];
+      if (rule.type === 'port') {
+        if (rule.port === 22 && rule.protocols.includes('tcp')) {
+          const cmd = `ssh 127.0.0.1 -p ${rule.host_port}`;
+          parts.push(copyButton(cmd), ' ', el('code', { text: cmd }));
+        } else if (rule.port === 80 && rule.protocols.includes('tcp')) {
+          const link = `http://127.0.0.1:${rule.host_port}`;
+          parts.push(copyButton(`curl ${link}`), ' ', el('code', {}, ['curl ', el('a', { href: link, target: '_blank', text: link })]));
+        } else {
+          if (rule.protocols.includes('tcp')) {
+            const cmd = `telnet localhost ${rule.host_port}`;
+            parts.push(copyButton(cmd), ' ', el('code', { text: cmd }), el('br'));
+          }
+          if (rule.protocols.includes('udp')) {
+            const cmd = `echo "test" | nc -u -w1 localhost ${rule.host_port}`;
+            parts.push(copyButton(cmd), ' ', el('code', { text: cmd }));
+          }
+        }
+      } else {
+        const link = rule.vhost ? `http://${rule.vhost}:${proxyPort}${rule.path}` : `http://127.0.0.1:${proxyPort}${rule.path}`;
+        const cmd = rule.vhost ? `curl -H "Host: ${rule.vhost}" ${link}` : `curl ${link}`;
+        parts.push(copyButton(cmd), ' ', el('code', { text: cmd }));
+      }
+      return el('td', {}, parts);
     }
 
     async function loadRules() {
-      const response = await apiFetch('/api/rules');
-      const rules = await response.json();
-      const tbody = document.querySelector('#rules tbody');
+      if (!config.inboundRulesEnabled) return;
+      const rules = await apiJson('/api/rules');
+      const tbody = $('#rules tbody');
       tbody.innerHTML = '';
+      const proxyPort = config.proxyPort || 8080;
       for (const rule of rules) {
-        const row = document.createElement('tr');
-        let source, path, targetPath, testInfo, typeDisplay;
-
-        let sourceDisplay, destinationDisplay;
-
+        let source;
+        let destination;
         if (rule.type === 'port') {
-          typeDisplay = `<span style="white-space: nowrap;">Port&nbsp;Forward</span>`;
-          sourceDisplay = `${rule.bind_address || '0.0.0.0'}:${rule.host_port}`;
-          destinationDisplay = `${rule.vm}:${rule.port} (${rule.protocols.join(', ').toUpperCase()})`;
-          targetPath = ''; // Not used in display, but keep for consistency
-
-          if (rule.port === 22 && rule.protocols.includes('tcp')) {
-            const sshCommand = `ssh 127.0.0.1 -p ${rule.host_port}`;
-            testInfo = `<button onclick="copyToClipboard('${sshCommand}')" class="catppuccin-button copy-button">Copy</button> <code>${sshCommand}</code>`;
-          } else if (rule.port === 80 && rule.protocols.includes('tcp')) {
-            const link = `http://127.0.0.1:${rule.host_port}`;
-            const curlCommand = `curl ${link}`;
-            testInfo = `<button onclick="copyToClipboard('${curlCommand}')" class="catppuccin-button copy-button">Copy</button> <code>curl <a href="${link}" target="_blank">${link}</a></code>`;
-          } else {
-            const tcpCommand = `telnet localhost ${rule.host_port}`;
-            const udpCommand = `echo "test" | nc -u -w1 localhost ${rule.host_port}`;
-            let commands = [];
-            if (rule.protocols.includes('tcp')) {
-              commands.push(`<button onclick="copyToClipboard('${tcpCommand}')" class="catppuccin-button copy-button">Copy</button> <code>${tcpCommand}</code>`);
-            }
-            if (rule.protocols.includes('udp')) {
-              commands.push(`<button onclick="copyToClipboard('${udpCommand}')" class="catppuccin-button copy-button">Copy</button> <code>${udpCommand}</code>`);
-            }
-            testInfo = commands.join('<br>');
-          }
-        } else { // http
-          typeDisplay = 'HTTP';
-          const proxyHost = `127.0.0.1:${PROXY_PORT}`;
-          const link = rule.vhost ? `http://${rule.vhost}:${PROXY_PORT}${rule.path}` : `http://${proxyHost}${rule.path}`;
-          sourceDisplay = `<a href="${link}" target="_blank">${proxyHost}${rule.path}</a>`;
-          destinationDisplay = `${rule.vm}:${rule.port}${rule.targetPath || ''}`;
-          targetPath = ''; // Not used in display, but keep for consistency
-          const curlCommand = rule.vhost ? `curl -H "Host: ${rule.vhost}" ${link}` : `curl ${link}`;
-          testInfo = `<button onclick="copyToClipboard('${curlCommand}')" class="catppuccin-button">Copy</button> <code>${curlCommand}</code>`;
+          source = el('span', { class: 'mono', text: `${rule.bind_address || '0.0.0.0'}:${rule.host_port}` });
+          destination = el('span', { class: 'mono', text: `${rule.vm}:${rule.port} (${rule.protocols.join(', ').toUpperCase()})` });
+        } else {
+          const link = rule.vhost ? `http://${rule.vhost}:${proxyPort}${rule.path}` : `http://127.0.0.1:${proxyPort}${rule.path}`;
+          source = el('a', { href: link, target: '_blank', class: 'mono', text: `${rule.vhost || '127.0.0.1'}:${proxyPort}${rule.path}` });
+          destination = el('span', { class: 'mono', text: `${rule.vm}:${rule.port}${rule.targetPath || ''}` });
         }
-
-        row.innerHTML = `
-          <td>${typeDisplay}</td>
-          <td>${sourceDisplay}</td>
-          <td>${destinationDisplay}</td>
-          <td>${testInfo}</td>
-          <td><button onclick="deleteRule('${rule.id}')" class="catppuccin-button delete-button">Delete</button></td>
-        `;
-        tbody.appendChild(row);
+        tbody.appendChild(el('tr', {}, [
+          el('td', { text: rule.type === 'port' ? 'Port forward' : 'HTTP' }),
+          el('td', {}, [source]),
+          el('td', {}, [destination]),
+          testCell(rule),
+          el('td', {}, [el('button', { type: 'button', class: 'small danger', text: 'Delete', 'data-action': 'delete', 'data-rule': rule.id })]),
+        ]));
       }
     }
 
-    async function deleteRule(id) {
-      await apiFetch(`/api/rules/${id}`, {method: 'DELETE'});
-      loadRules();
+    $('#rules').addEventListener('click', async (event) => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      if (button.dataset.action === 'copy') {
+        copyToClipboard(button.dataset.command);
+        return;
+      }
+      if (button.dataset.action === 'delete') {
+        try {
+          await apiFetch(`/api/rules/${encodeURIComponent(button.dataset.rule)}`, { method: 'DELETE' });
+          await loadRules();
+        } catch (error) {
+          showToaster(error.message, true);
+        }
+      }
+    });
+
+    async function submitRule(rule) {
+      try {
+        await postJson('/api/rules', rule);
+        showToaster('Rule added');
+        await loadRules();
+      } catch (error) {
+        showToaster(error.message, true);
+      }
     }
 
-    async function setNickname(sessionId, nickname) {
-      if (nickname) { // Only send if nickname is not empty
-        await apiFetch(`/api/sessions/${sessionId}/nickname`, {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({nickname}),
+    $('#add-rule-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (currentProxyType === 'port') {
+        const vm = $('#vm-port').value;
+        if (!vm) { showToaster('Select an active VM', true); return; }
+        const protocols = $$('input[name="protocol"]:checked').map((cb) => cb.value);
+        if (protocols.length === 0) { showToaster('Select at least one protocol', true); return; }
+        await submitRule({
+          type: 'port',
+          protocols,
+          vm,
+          port: Number.parseInt($('#port-port').value, 10),
+          host_port: Number.parseInt($('#host_port').value, 10),
+          bind_address: $('#bind_address').value.trim(),
         });
       } else {
-        // If nickname is empty, delete it
-        await apiFetch(`/api/sessions/${sessionId}/nickname`, {
-          method: 'DELETE',
+        const vm = $('#vm').value;
+        if (!vm) { showToaster('Select an active VM', true); return; }
+        await submitRule({
+          type: 'http',
+          vm,
+          port: Number.parseInt($('#port').value, 10),
+          vhost: $('#vhost').value.trim(),
+          path: $('#path').value.trim() || '/',
+          targetPath: $('#targetPath').value.trim(),
         });
       }
-      fetchSessions(); // Refresh sessions to show updated nickname
+    });
+
+    function firstVm(select) {
+      return select.options[1] ? select.options[1].value : '';
     }
 
-    function editNickname(sessionId, currentNickname) {
-      const displaySpan = document.getElementById(`display-nickname-${sessionId}`);
-      const originalContent = displaySpan.innerHTML;
-
-      const input = document.createElement('input');
-      input.type = 'text';
-      input.value = currentNickname;
-      input.className = 'catppuccin-input';
-      input.style.width = 'auto'; // Adjust width as needed
-
-      displaySpan.innerHTML = '';
-      displaySpan.appendChild(input);
-      input.focus();
-
-      const handleSave = async () => {
-        const newNickname = input.value.trim();
-        await setNickname(sessionId, newNickname);
-        displaySpan.innerHTML = originalContent; // Revert to original content temporarily
-        fetchSessions(); // Refresh to show actual new nickname
-      };
-
-      input.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter') {
-          event.preventDefault();
-          handleSave();
-        }
-      });
-
-      input.addEventListener('blur', () => {
-        // If the input loses focus, save the nickname (or delete if empty)
-        handleSave();
-      });
-    }
-
-    async function addSshPortForward() {
+    $('#quick-ssh').addEventListener('click', () => {
       switchTab('port');
+      $('#host_port').value = '2222';
+      $('#port-port').value = '22';
+      $('#vm-port').value = $('#vm-port').value || firstVm($('#vm-port'));
+      $('input[name="protocol"][value="tcp"]').checked = true;
+      $('input[name="protocol"][value="udp"]').checked = false;
+      $('#add-rule-form').requestSubmit();
+    });
 
-      document.getElementById('host_port').value = '2222';
-      document.getElementById('port-port').value = '22';
-      document.getElementById('vm-port').value = document.getElementById('vm-port').options[1] ? document.getElementById('vm-port').options[1].value : ''; // Select first available VM
-
-      document.querySelector('input[name="protocol"][value="tcp"]').checked = true;
-      document.querySelector('input[name="protocol"][value="udp"]').checked = false;
-
-      document.getElementById('add-rule-form').dispatchEvent(new Event('submit'));
-    }
-
-    async function addHttpPortForward() {
+    $('#quick-http').addEventListener('click', () => {
       switchTab('http');
+      $('#port').value = '80';
+      $('#path').value = '/';
+      $('#targetPath').value = '';
+      $('#vhost').value = '';
+      $('#vm').value = $('#vm').value || firstVm($('#vm'));
+      $('#add-rule-form').requestSubmit();
+    });
 
-      document.getElementById('port').value = '80';
-      document.getElementById('path').value = '/';
-      document.getElementById('targetPath').value = '';
-      document.getElementById('vhost').value = '';
-      document.getElementById('vm').value = document.getElementById('vm').options[1] ? document.getElementById('vm').options[1].value : ''; // Select first available VM
-
-      document.getElementById('add-rule-form').dispatchEvent(new Event('submit'));
-    }
+    // ---------- boot ----------------------------------------------------------
 
     (async () => {
-      const authenticated = await checkAuthStatus();
-      setAuthenticatedState(authenticated);
-      if (authenticated) {
-        startPolling();
+      try {
+        const response = await fetch('/api/auth/status');
+        const status = await response.json();
+        if (status.authenticated) {
+          await start(status.username);
+          return;
+        }
+      } catch (_error) {
+        // fall through to the login form
       }
+      setAuthenticatedState(false);
     })();
   </script>
 </body>
