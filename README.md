@@ -270,7 +270,9 @@ tunnel or your platform's proxy) shows live sessions with owner, tier and
 policy counters, lets operators kill sessions, manage accounts, tokens, bans
 and tiers, browse the connection audit log and view per-account usage.
 `GET /metrics` exposes Prometheus metrics to a logged-in operator or to a
-scraper presenting `Authorization: Bearer $METRICS_TOKEN`.
+scraper presenting `Authorization: Bearer $METRICS_TOKEN`. Set
+`METRICS_PUBLIC=true` to let an unauthenticated scraper read it when the
+admin port is only reachable over a private network.
 
 ### Hosted-mode settings
 
@@ -293,7 +295,7 @@ scraper presenting `Authorization: Bearer $METRICS_TOKEN`.
 | `SHUTDOWN_TIMEOUT_MS`, `SHUTDOWN_HARD_EXIT_MS` | Flush budget and hard exit after SIGTERM. | `500`, `800` | same |
 | `AUDIT_ENABLED`, `AUDIT_RETENTION_DAYS` | Connection audit log and its retention. | `false`, `30` | `true`, `30` |
 | `USAGE_FLUSH_INTERVAL_MS` | How often byte counters are persisted. | `30000` | same |
-| `METRICS_ENABLED`, `METRICS_TOKEN` | Prometheus endpoint and an optional scrape token. | `false` | `true` |
+| `METRICS_ENABLED`, `METRICS_TOKEN`, `METRICS_PUBLIC` | Prometheus endpoint, an optional scrape token, and whether to serve it without auth. | `false` | `true`, unset, `false` |
 | `LOG_JSON` | JSON-lines logs for the hosted modules. | `false` | `true` |
 | `ADMIN_AUTH_DB_PATH` | SQLite database (accounts, tokens, usage, audit, admin sessions). | `./admin_auth.sqlite` | `/data/admin_auth.sqlite` in Docker |
 | `ADMIN_SESSION_SECRET`, `ADMIN_BOOTSTRAP_USERNAME`, `ADMIN_BOOTSTRAP_PASSWORD`, `ADMIN_TRUST_PROXY`, `ADMIN_COOKIE_SECURE` | Operator login. The bootstrap pair creates the first operator when none exists. | | secret required |

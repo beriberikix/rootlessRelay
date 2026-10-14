@@ -185,6 +185,8 @@ function createAdminApp({
   app.use(passport.session());
 
   // Prometheus scrape endpoint: operator session or METRICS_TOKEN bearer.
+  // METRICS_PUBLIC=true skips auth for scrapers on a private network (e.g. a
+  // platform scraper reaching the admin port over its internal network).
   app.get("/metrics", asyncRoute(async (req, res) => {
     if (!metrics || !metrics.enabled) {
       res.status(404).json({ error: "metrics are disabled" });
@@ -195,7 +197,7 @@ function createAdminApp({
     const tokenOk = config.metricsToken && bearer && bearer.length === config.metricsToken.length &&
       require("crypto").timingSafeEqual(Buffer.from(bearer), Buffer.from(config.metricsToken));
     const sessionOk = req.isAuthenticated && req.isAuthenticated();
-    if (!tokenOk && !sessionOk) {
+    if (!config.metricsPublic && !tokenOk && !sessionOk) {
       res.status(401).json({ error: "Unauthorized" });
       return;
     }

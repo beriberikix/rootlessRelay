@@ -38,6 +38,7 @@ test("hosted mode flips the safety defaults", () => {
   assert.equal(config.adminTrustProxy, true);
   assert.equal(config.auditEnabled, true);
   assert.equal(config.metricsEnabled, true);
+  assert.equal(config.metricsPublic, false);
   assert.equal(config.logJson, true);
   assert.ok(config.warnings.some((w) => w.includes("ALLOWED_ORIGINS")));
 });
@@ -106,4 +107,9 @@ test("invalid scalar values raise ConfigError", () => {
   assert.throws(() => resolveConfig({ WS_HEARTBEAT_MS: "soon" }), ConfigError);
   assert.throws(() => resolveConfig({ TRUST_PROXY_HOPS: "0" }), ConfigError);
   assert.throws(() => resolveConfig({ TIERS_JSON: "{" }), ConfigError);
+});
+
+test("METRICS_PUBLIC opts the scrape endpoint out of auth", () => {
+  const config = resolveConfig({ ...HOSTED_MIN, METRICS_PUBLIC: "true" });
+  assert.equal(config.metricsPublic, true);
 });

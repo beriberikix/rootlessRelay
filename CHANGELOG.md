@@ -33,6 +33,8 @@
   the reverse proxy listener only starts when `INBOUND_RULES_ENABLED`.
 - Docker image defaults to hosted mode; compose publishes only the public
   port and the loopback admin port.
+- `METRICS_PUBLIC=true` serves `/metrics` without authentication for
+  scrapers on a private network.
 
 ### Changed (fork)
 
