@@ -2,22 +2,32 @@ services:
   relay:
     build: .
     ports:
-      # WebSocket data plane (plain WS; put TLS termination in front of it).
+      # Public WebSocket + /healthz + anonymous token endpoint (plain WS; put
+      # TLS termination in front of it).
       - "8086:8086"
-      # Admin UI and HTTP reverse proxy: published to the host loopback only.
-      # Remove the 127.0.0.1 prefix to expose them on the host's interfaces.
+      # Operator admin UI and /metrics: published to the host loopback only.
+      # Reach it through an SSH tunnel; do not expose it publicly.
       - "127.0.0.1:8001:8001"
-      - "127.0.0.1:8080:8080"
     # Values are read from a .env file next to this compose.yml (see .env.example).
     environment:
+      RELAY_MODE: ${RELAY_MODE:-hosted}
       ADMIN_SESSION_SECRET: ${ADMIN_SESSION_SECRET:?set ADMIN_SESSION_SECRET in .env}
-      # Only needed on first start, to create the initial admin user.
+      ANON_TOKEN_SECRET: ${ANON_TOKEN_SECRET:-}
+      ANON_ENABLED: ${ANON_ENABLED:-true}
+      # Only needed on first start, to create the initial operator.
       ADMIN_BOOTSTRAP_USERNAME: ${ADMIN_BOOTSTRAP_USERNAME:-}
       ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD:-}
-      # Set both to true when the admin UI is served through an HTTPS reverse proxy.
       ADMIN_COOKIE_SECURE: ${ADMIN_COOKIE_SECURE:-false}
       ADMIN_TRUST_PROXY: ${ADMIN_TRUST_PROXY:-false}
-      LOG_LEVEL: ${LOG_LEVEL:-1}
+      TRUST_PROXY: ${TRUST_PROXY:-true}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+      TURNSTILE_SECRET: ${TURNSTILE_SECRET:-}
+      JWT_ISSUER: ${JWT_ISSUER:-}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-}
+      JWT_JWKS_URL: ${JWT_JWKS_URL:-}
+      TIERS_JSON: ${TIERS_JSON:-}
+      LOG_LEVEL: ${LOG_LEVEL:-0}
     volumes:
       - relay_data:/data
     restart: unless-stopped

@@ -16,22 +16,27 @@ COPY . .
 # Persistent state (the admin user database) lives on a volume at /data.
 RUN mkdir -p /data && chown -R node:node /data /app
 
-# Container-appropriate defaults. TLS is expected to terminate at a reverse
+# Container-appropriate defaults. The image runs in hosted mode (authentication
+# required, egress policy on, inbound rules off); set RELAY_MODE=local for the
+# original single-operator behavior. TLS is expected to terminate at a reverse
 # proxy or load balancer in front of the container, so the relay speaks plain
 # WebSocket here. Set ENABLE_WSS=true and mount key.pem/cert.pem into /app to
-# terminate TLS inside the container instead.
-ENV ENABLE_WSS=false \
+# terminate TLS inside the container instead. LOG_LEVEL=0 keeps the data plane
+# from logging every packet.
+ENV RELAY_MODE=hosted \
+    LOG_LEVEL=0 \
+    ENABLE_WSS=false \
     WS_BIND_ADDRESS=0.0.0.0 \
     WS_PORT=8086 \
     ADMIN_BIND_ADDRESS=0.0.0.0 \
     ADMIN_PORT=8001 \
-    PROXY_BIND_ADDRESS=0.0.0.0 \
+    PROXY_BIND_ADDRESS=127.0.0.1 \
     PROXY_PORT=8080 \
     ADMIN_AUTH_DB_PATH=/data/admin_auth.sqlite
 
 USER node
 
-EXPOSE 8086 8001 8080
+EXPOSE 8086 8001
 
 # Readiness: the public listener answers /healthz with 200 (503 while shutting down).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

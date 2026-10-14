@@ -18,6 +18,10 @@ A WebSocket based VPN/proxy relay for virtual machines.
   for handshakes, data, and connection teardown in both relay directions.
 - **TCP Flow Recovery:** Overlapping receive ranges are deduplicated, and
   zero-window probes recover lost window-reopen updates in both directions.
+- **Hosted Mode:** Authentication (accounts, API tokens, anonymous demo
+  tokens, external OIDC), tenant isolation, egress policy, per-tier limits and
+  quotas, audit log, metrics, and an operator panel for running the relay as a
+  multi-user service. See [Hosted mode](#hosted-mode).
 
 ## Configuration
 
@@ -166,23 +170,154 @@ ADMIN_COOKIE_SECURE=true
 
 ### 5. Running in Docker
 
-The image runs as the unprivileged `node` user, speaks plain WebSocket on
-port 8086, and keeps the admin user database on a volume at `/data`. TLS is
-expected to terminate at a reverse proxy or load balancer in front of the
-container.
+The image runs as the unprivileged `node` user in **hosted mode** (see below):
+authentication required, egress policy on, inbound rules off, per-packet
+logging off. It speaks plain WebSocket on port 8086 and keeps its database on
+a volume at `/data`. TLS is expected to terminate at a reverse proxy or load
+balancer in front of the container.
 
 ```bash
-cp .env.example .env   # set ADMIN_SESSION_SECRET and the bootstrap credentials
+cp .env.example .env   # set ADMIN_SESSION_SECRET, ANON_TOKEN_SECRET and the bootstrap credentials
 docker compose up -d --build
 ```
 
-The admin UI and HTTP reverse proxy are published on the host loopback only
-(`127.0.0.1:8001` and `127.0.0.1:8080`). The bootstrap credentials are used
-once, when the database is empty, and can be removed from `.env` afterwards.
+The admin UI is published on the host loopback only (`127.0.0.1:8001`). The
+bootstrap credentials are used once, when the database is empty, and can be
+removed from `.env` afterwards. To run the container the way the bare
+`npm start` behaves (no authentication, open egress), set `RELAY_MODE=local`.
 
 To terminate TLS inside the container instead, set `ENABLE_WSS=true`, mount
 `key.pem` and `cert.pem` into `/app`, and publish `WS_PORT` (default 8443 when
 WSS is on).
+
+## Hosted mode
+
+`RELAY_MODE=hosted` turns the relay into a multi-user service. The default
+(`local`) keeps the original single-operator behavior, so existing setups,
+tests and benchmarks are unaffected. Every setting below can be overridden
+individually in either mode.
+
+### What hosted mode changes
+
+| Concern | Local (default) | Hosted |
+| --- | --- | --- |
+| WebSocket authentication | none | required: API token, anonymous token or external JWT |
+| Egress policy | open | denies loopback, link-local (cloud metadata), RFC1918, CGNAT, multicast, reserved ranges, the relay's own addresses and port 25 |
+| Tenant isolation | all VMs share one LAN | VM-to-VM only between sessions of the same account; anonymous sessions are isolated |
+| Source address anti-spoofing | on | on |
+| Per-session caps (connections, SYN rate, DNS rate, UDP flows, bandwidth, lifetime) | unlimited | per tier |
+| Inbound rules (reverse proxy / port forwards) | enabled | disabled |
+| Client IP behind a proxy | socket address | `X-Forwarded-For` (`TRUST_PROXY`) |
+| Audit log, metrics, JSON logs | off | on |
+| Startup validation | warn on default secret | refuse default secret, require `ANON_TOKEN_SECRET`, refuse `EGRESS_POLICY=open` |
+
+### Connecting a client
+
+Browser clients cannot set HTTP headers on a WebSocket, so the credential is
+sent as a subprotocol entry next to `relay.v1`; the server answers with
+`relay.v1`:
+
+```js
+const ws = new WebSocket("wss://relay.example.com", ["relay.v1", `relay.token.${token}`]);
+```
+
+Non-browser clients may send `Authorization: Bearer <token>` instead. Rejected
+upgrades return a plain HTTP status before the handshake: 401 (no or invalid
+credential), 403 (banned account, origin not allowed), 429 (per-address,
+per-account or quota limit), 503 (address pool exhausted or shutting down).
+
+Tokens come from one of three places:
+
+- **API tokens** (`rr_…`): created by an operator for an account via the admin
+  panel or `POST /api/users/:id/tokens`. Hashed at rest, revocable, optional
+  expiry.
+- **Anonymous demo tokens**: `POST /api/anon/token` on the public port returns
+  a short-lived token bound to the caller's address, limited to
+  `ANON_TOKENS_PER_IP_PER_HOUR`. If `TURNSTILE_SECRET` is set, the request
+  body must carry a valid Cloudflare Turnstile `turnstileToken`.
+- **External OIDC JWTs**: set `JWT_ISSUER`, `JWT_AUDIENCE` and `JWT_JWKS_URL`.
+  Tokens are verified against the provider's JWKS and an account is created on
+  first sight (`JWT_USERNAME_CLAIM`, `JWT_DEFAULT_TIER`).
+
+The public port also serves `GET /healthz` (200, or 503 while shutting down).
+
+### Tiers
+
+Identities map to tiers: `anon`, `user`, `operator` (and `local` for
+unauthenticated local-mode sessions). Defaults:
+
+| Limit | anon | user | operator |
+| --- | --- | --- | --- |
+| Upload / download bandwidth | 256 KiB/s / 512 KiB/s | `RATE_LIMIT_KBPS` | 4 MiB/s |
+| Concurrent TCP connections | 32 | 256 | 1024 |
+| New connections per second / DNS queries per second | 10 / 20 | 50 / 100 | 200 / 400 |
+| Allowed TCP ports | 80, 443 | any (minus `EGRESS_DENY_PORTS`) | any |
+| DNS servers | `DNS_SERVER_IP` only | any public | any public |
+| VM-to-VM | no | same account | same account |
+| Session lifetime / idle timeout | 15 min / 3 min | 12 h / 30 min | none |
+| Sessions per account / per address | 1 / 2 | 4 / `MAX_CONNECTIONS_PER_IP` | 10 |
+| Quota | 200 MB per day per address | 20 GB per month | none |
+
+Override any field with `TIERS_JSON`, for example
+`TIERS_JSON='{"user":{"quotaBytes":53687091200},"anon":{"maxSessionMs":600000}}'`.
+`null` means unlimited. Operators can move an account to another tier from the
+admin panel.
+
+### Operator panel and API
+
+The admin app on `ADMIN_PORT` (keep it private; reach it through an SSH
+tunnel or your platform's proxy) shows live sessions with owner, tier and
+policy counters, lets operators kill sessions, manage accounts, tokens, bans
+and tiers, browse the connection audit log and view per-account usage.
+`GET /metrics` exposes Prometheus metrics to a logged-in operator or to a
+scraper presenting `Authorization: Bearer $METRICS_TOKEN`.
+
+### Hosted-mode settings
+
+| Setting | Purpose | Local default | Hosted default |
+| --- | --- | --- | --- |
+| `RELAY_MODE` | `local` or `hosted`. | `local` | |
+| `AUTH_REQUIRED` | Require a credential on every WebSocket upgrade. | `false` | `true` |
+| `ANON_ENABLED`, `ANON_TOKEN_SECRET` | Anonymous demo tokens and their signing key. | `false` | `true`, required |
+| `ANON_TOKEN_TTL_S`, `ANON_TOKEN_BIND_IP`, `ANON_TOKENS_PER_IP_PER_HOUR` | Anonymous token lifetime, address binding, issuance limit. | `900`, `true`, `10` | same |
+| `TURNSTILE_SECRET` | Require a Cloudflare Turnstile check to issue anonymous tokens. | unset | unset |
+| `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_JWKS_URL`, `JWT_USERNAME_CLAIM`, `JWT_DEFAULT_TIER` | External OIDC verification. | unset | unset |
+| `ALLOWED_ORIGINS` | Comma-separated browser origins allowed to open sessions and request anonymous tokens. | unset | unset (warns) |
+| `ALLOW_QUERY_TOKEN` | Accept `?token=` on the upgrade URL (leaks into logs). | `false` | `false` |
+| `EGRESS_POLICY`, `EGRESS_DENY_CIDRS`, `EGRESS_ALLOW_CIDRS`, `EGRESS_DENY_PORTS` | Outbound destination policy. Allow-listed CIDRs are exceptions to the deny list. | `open` | `hosted`, deny port 25 |
+| `ANTI_SPOOF` | Lock each session to its first source IP and MAC. | `true` | `true` |
+| `TRUST_PROXY`, `TRUST_PROXY_HOPS`, `CLIENT_IP_HEADER` | Derive the client address from a trusted reverse proxy header. | `false` | `true`, `1`, `x-forwarded-for` |
+| `INBOUND_RULES_ENABLED` | Enable the reverse proxy and port-forward rules. | `true` | `false` |
+| `TIERS_JSON` | Tier overrides. | unset | unset |
+| `WS_HEARTBEAT_MS`, `SESSION_IDLE_TIMEOUT_MS` | Ping interval (terminate after two missed pongs) and a global idle timeout override. | `30000`, `0` | same |
+| `SHUTDOWN_TIMEOUT_MS`, `SHUTDOWN_HARD_EXIT_MS` | Flush budget and hard exit after SIGTERM. | `500`, `800` | same |
+| `AUDIT_ENABLED`, `AUDIT_RETENTION_DAYS` | Connection audit log and its retention. | `false`, `30` | `true`, `30` |
+| `USAGE_FLUSH_INTERVAL_MS` | How often byte counters are persisted. | `30000` | same |
+| `METRICS_ENABLED`, `METRICS_TOKEN` | Prometheus endpoint and an optional scrape token. | `false` | `true` |
+| `LOG_JSON` | JSON-lines logs for the hosted modules. | `false` | `true` |
+| `ADMIN_AUTH_DB_PATH` | SQLite database (accounts, tokens, usage, audit, admin sessions). | `./admin_auth.sqlite` | `/data/admin_auth.sqlite` in Docker |
+| `ADMIN_SESSION_SECRET`, `ADMIN_BOOTSTRAP_USERNAME`, `ADMIN_BOOTSTRAP_PASSWORD`, `ADMIN_TRUST_PROXY`, `ADMIN_COOKIE_SECURE` | Operator login. The bootstrap pair creates the first operator when none exists. | | secret required |
+| `ADMIN_PUBLIC_PATH` | Also mount the admin app on the public port under this prefix (single-port platforms; requires `ADMIN_COOKIE_SECURE=true`). | unset | unset |
+
+Set `LOG_LEVEL=0` in hosted deployments; the data plane logs every packet at
+the default level.
+
+### Deployment notes
+
+- One instance serves at most 240 concurrent sessions (the `10.0.2.0/24`
+  pool). Session state is in memory and the database is SQLite, so run a
+  single instance behind TLS termination. Fly.io or a VPS with Docker and a
+  reverse proxy are the simplest fits. Cloud Run works for the WebSocket data
+  plane but cuts connections at its request timeout, so set `maxSessionMs`
+  below it and keep `min-instances=1`.
+- Egress bandwidth is the dominant cost. Tier quotas and `RATE_LIMIT_KBPS`
+  are the knobs.
+- The audit log (owner, destination, bytes, times) is what lets you answer an
+  abuse report; keep `AUDIT_RETENTION_DAYS` at least as long as your provider's
+  complaint window.
+- Upload limiting drops VM data segments over budget, so it polices rather
+  than shapes. Anonymous tokens are bound to the client address and break if
+  that address changes mid-session.
 
 ## IP-stack choke test
 

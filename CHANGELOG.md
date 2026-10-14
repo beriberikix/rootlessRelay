@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+### Added (fork: hosted multi-user mode)
+
+- `RELAY_MODE=hosted` turns the relay into a multi-user service while the
+  default `local` mode keeps upstream behavior. Policy, auth, lifecycle and
+  admin code live in new modules; the data plane calls them from marked
+  one-line hooks.
+- Authentication at the WebSocket upgrade: per-account API tokens, short-lived
+  anonymous demo tokens (optional Cloudflare Turnstile gate), and external
+  OIDC JWTs verified via JWKS. Tokens travel as a `relay.token.<token>`
+  subprotocol entry or an `Authorization: Bearer` header.
+- Egress policy that refuses loopback, link-local (cloud metadata), private,
+  CGNAT, multicast and reserved destinations plus port 25 with an immediate
+  TCP RST; CIDR allow/deny lists.
+- Learn-then-lock source address and MAC anti-spoofing, owner-scoped VM-to-VM
+  reachability, per-tier caps (connections, SYN and DNS rates, UDP flows,
+  bandwidth in both directions, session lifetime, sessions per account and
+  per address) and byte quotas.
+- Graceful shutdown on SIGTERM/SIGINT (clients receive close code 1001),
+  crash handlers, WebSocket heartbeat, idle timeouts, `GET /healthz`.
+- Trusted-proxy client address resolution (`TRUST_PROXY`), Origin allow list,
+  CORS for the anonymous token endpoint.
+- SQLite-backed accounts, API tokens, operator sessions, monthly usage and a
+  pruned connection audit log; Prometheus metrics on `/metrics`.
+- Operator panel rebuilt: sessions with owner/tier/policy counters and kill,
+  accounts and tokens (create, ban/unban, tier, password, revoke), audit log
+  browser, usage, inbound rules hidden when disabled. All values are rendered
+  as text nodes.
+- Inbound rule bodies are validated (pool address, ports, bind address) and
+  the reverse proxy listener only starts when `INBOUND_RULES_ENABLED`.
+- Docker image defaults to hosted mode; compose publishes only the public
+  port and the loopback admin port.
+
+### Changed (fork)
+
+- Legacy `admin_users` rows migrate into the `users` table as operators.
+- UDP replies, VM-to-VM traffic and reverse-proxy traffic now count against
+  the per-session download budget.
+- Missing operator bootstrap credentials no longer stop the relay; operator
+  login is simply unavailable until an operator exists.
+
+### Fixed (fork)
+
+- `benchmarks/ws-relay-throughput.js` logs into the admin API before polling
+  sessions; its accounting had been broken since admin authentication was
+  added.
+- A VM that changed its MAC mid-session no longer leaks its first IP
+  allocation (the MAC is locked instead).
+
 ### Fixed
 
 - Deduplicate overlapping out-of-order TCP receive ranges and deliver their
