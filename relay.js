@@ -272,35 +272,36 @@ function releaseIP(mac) {
   }
 }
 
-let wss;
-if (ENABLE_WSS) {
-  const https = require("https");
-  const fs = require("fs");
+// HOSTED: policy, auth, lifecycle and the admin API live in ./hosted.js and
+// the modules it composes. relay.js only calls into them at marked hooks.
+const hosted = require("./hosted").init({
+  env: process.env,
+  GATEWAY_IP,
+  DHCP_START,
+  DHCP_END,
+  DNS_SERVER_IP,
+  ENABLE_VM_TO_VM,
+  RATE_LIMIT_BPS,
+  MAX_CONNECTIONS_PER_IP,
+  MAX_UDP_FLOWS_PER_SESSION,
+  ADMIN_PORT,
+  ADMIN_BIND_ADDRESS,
+  PROXY_PORT,
+  macToIP,
+  ipToSession,
+  usedIPs,
+  activeSessions,
+  connectionsPerIP,
+});
 
-  const httpsServer = https.createServer({
-    cert: fs.readFileSync("cert.pem"),
-    key: fs.readFileSync("key.pem"),
-  });
-
-  wss = new WebSocket.Server({
-    server: httpsServer,
-    perMessageDeflate: false,
-    maxPayload: MAX_ETHERNET_IPV4_FRAME_SIZE,
-  });
-
-  httpsServer.listen(WS_PORT, WS_BIND_ADDRESS);
-  console.log(
-    `Secure WebSocket (WSS) VPN server, visit https://${WS_BIND_ADDRESS}:${WS_PORT} and trust your certificate`,
-  );
-} else {
-  wss = new WebSocket.Server({
-    port: WS_PORT,
-    host: WS_BIND_ADDRESS,
-    perMessageDeflate: false,
-    maxPayload: MAX_ETHERNET_IPV4_FRAME_SIZE,
-  });
-  console.log(`WebSocket VPN server listening on ${WS_BIND_ADDRESS}:${WS_PORT}`);
-}
+// HOSTED: the public listener (WS/WSS, /healthz, upgrade auth) is built in
+// ./server/public.js.
+const wss = hosted.createWebSocketServer({
+  ENABLE_WSS,
+  WS_PORT,
+  WS_BIND_ADDRESS,
+  maxPayload: MAX_ETHERNET_IPV4_FRAME_SIZE,
+});
 
 console.log(
   "\x1b[33m%s\x1b[0m",
@@ -781,6 +782,7 @@ class VMSession {
     this.clearDelayedTCPAck(conn);
     conn.retransmission?.close();
     this.tcpConnections.delete(connKey);
+    this.policy.onTcpClose(this, connKey, conn, error); // HOSTED: audit
     if (sendReset && this.ws.readyState === WebSocket.OPEN) {
       this.sendTCP(
         conn,
@@ -806,6 +808,7 @@ class VMSession {
     this.clearDelayedTCPAck(conn);
     conn.retransmission.close();
     conn.socket?.end();
+    this.policy.onTcpClose(this, connKey, conn); // HOSTED: audit
     setTimeout(() => {
       if (this.tcpConnections.get(connKey) === conn) {
         this.tcpConnections.delete(connKey);
@@ -1189,6 +1192,7 @@ class VMSession {
 
       const srcMAC = frame.slice(6, 12);
       const etherType = frame.readUInt16BE(12);
+      if (!this.policy.admitFrame(this, srcMAC)) return; // HOSTED: MAC lock
 
       // Store MAC address
       if (!this.vmMACBytes || !this.vmMACBytes.equals(srcMAC)) {
@@ -1269,7 +1273,7 @@ class VMSession {
       }
 
       const targetSession = ipToSession.get(targetIP);
-      if (targetSession && targetSession.vmMAC) {
+      if (targetSession && targetSession.vmMAC && this.policy.canReach(this, targetSession)) { // HOSTED
         // Reply with the target VM's MAC
         const reply = Buffer.alloc(42);
         arpPacket.slice(8, 14).copy(reply, 0); // Dest MAC (requester)
@@ -1305,6 +1309,7 @@ class VMSession {
 
     ipPacket = parsed.packet;
     const { protocol, srcIP, dstIP } = parsed;
+    if (!this.policy.admitIPv4(this, parsed, ipPacket)) return; // HOSTED: anti-spoof, upload budget
 
     if (log_level >= LOG_LEVEL_DEBUG) {
       const proto = protocol === 6
@@ -1329,7 +1334,7 @@ class VMSession {
         console.log(`📢 Broadcasting UDP packet from ${srcIP}`);
       }
       activeSessions.forEach((session, _sessionId) => {
-        if (session.vmIP && session.vmIP !== srcIP) {
+        if (session.vmIP && session.vmIP !== srcIP && this.policy.canReach(this, session)) { // HOSTED
           if (log_level >= LOG_LEVEL_DEBUG) {
             console.log(`   -> Relaying to ${session.vmIP}`);
           }
@@ -1345,7 +1350,7 @@ class VMSession {
       dstIP !== "10.0.2.255"
     ) {
       const targetSession = ipToSession.get(dstIP);
-      if (targetSession) {
+      if (targetSession && this.policy.canReach(this, targetSession)) { // HOSTED
         if (log_level >= LOG_LEVEL_DEBUG) {
           console.log(`🔄 Routing to VM ${dstIP}`);
         }
@@ -1417,6 +1422,8 @@ class VMSession {
         }
         return;
       }
+      // HOSTED: egress policy, SYN rate and connection cap.
+      if (!this.policy.allowTcpConnect(this, { srcIP, srcPort, dstIP, dstPort, seqNum })) return;
       if (log_level >= LOG_LEVEL_DEBUG) {
         console.log(`   Opening connection to ${dstIP}:${dstPort}`);
       }
@@ -2093,6 +2100,7 @@ class VMSession {
         console.log(`   🔎 DNS Query for: ${hostname}`);
       }
 
+      if (!this.policy.allowUdpSend(this, dstIP, dstPort, true, payload.length)) return; // HOSTED
       const accepted = this.udpFlows.send(payload, {
         vmPort: srcPort,
         vmIP: srcIP,
@@ -2110,6 +2118,7 @@ class VMSession {
       console.log(`📀 Forwarding UDP to ${dstIP}:${dstPort}`);
     }
 
+    if (!this.policy.allowUdpSend(this, dstIP, dstPort, false, payload.length)) return; // HOSTED
     const accepted = this.udpFlows.send(payload, {
       vmPort: srcPort,
       vmIP: srcIP,
@@ -2389,6 +2398,10 @@ class VMSession {
   }
 
   sendIPToVM(ipPacket, callback) {
+    if (!this.policy.admitDownload(this, ipPacket)) { // HOSTED: download budget
+      if (callback) callback(new Error("rate limited"));
+      return;
+    }
     this.bytesSent += ipPacket.length;
     const frame = Buffer.alloc(14 + ipPacket.length);
 
@@ -2482,61 +2495,9 @@ class VMSession {
   }
 }
 
-wss.on("connection", (ws, req) => {
-  const clientIP = req.socket.remoteAddress;
-  try {
-    if (ws._socket && typeof ws._socket.setNoDelay === "function") {
-      ws._socket.setNoDelay(true);
-      ws._socket.setKeepAlive(true, 30000);
-      if (log_level >= LOG_LEVEL_DEBUG) {
-        console.log(`🚀 WS transport tuned: TCP_NODELAY + keepalive for ${clientIP}`);
-      }
-    }
-  } catch (e) {
-    if (log_level >= LOG_LEVEL_DEBUG) {
-      console.log(`⚠️ Failed to tune WS transport socket: ${e.message}`);
-    }
-  }
-
-  const currentConnections = connectionsPerIP.get(clientIP) || 0;
-  if (currentConnections >= MAX_CONNECTIONS_PER_IP) {
-    console.log(`⛔ Connection limit reached for ${clientIP}`);
-    ws.close(1008, "Connection limit reached");
-    return;
-  }
-
-  connectionsPerIP.set(clientIP, currentConnections + 1);
-  console.log(`✅ New connection from ${clientIP}`);
-
-  const session = new VMSession(ws, clientIP, req.socket);
-  const sessionId = crypto.randomUUID();
-  activeSessions.set(sessionId, session);
-
-  ws.on("message", (data, isBinary) => {
-    if (!isBinary) {
-      const str = data.toString();
-      if (str.startsWith("ping:")) {
-        ws.send("pong:" + str.substring(5), () => session.resumeTCPTransportWaiters());
-      }
-      return;
-    }
-
-    session.handleEthernetFrame(data);
-  });
-
-  ws.on("close", () => {
-    const currentConnections = connectionsPerIP.get(clientIP) || 0;
-    connectionsPerIP.set(clientIP, Math.max(0, currentConnections - 1));
-    console.log(`❌ Connection closed from ${clientIP}`);
-
-    session.close();
-    activeSessions.delete(sessionId);
-  });
-
-  ws.on("error", (err) => {
-    console.error("⚠️ WebSocket error:", err.message);
-  });
-});
+// HOSTED: session setup, heartbeat, idle/lifetime timers and cleanup live in
+// ./server/connection.js.
+hosted.attachConnectionHandler(wss, VMSession);
 
 console.log(
   `💡 VMs will be assigned IPs from 10.0.2.${DHCP_START} to 10.0.2.${DHCP_END}`,
@@ -2554,191 +2515,6 @@ if (ENABLE_VM_TO_VM) {
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
-const express = require("express");
-const passport = require("passport");
-const LocalStrategy = require("passport-local").Strategy;
-const session = require("express-session");
-const bcrypt = require("bcryptjs");
-const sqlite3 = require("sqlite3").verbose();
-
-const ADMIN_SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || "change-me-in-production";
-const ADMIN_AUTH_DB_PATH = process.env.ADMIN_AUTH_DB_PATH || path.join(__dirname, "admin_auth.sqlite");
-const ADMIN_BOOTSTRAP_USERNAME = process.env.ADMIN_BOOTSTRAP_USERNAME;
-const ADMIN_BOOTSTRAP_PASSWORD = process.env.ADMIN_BOOTSTRAP_PASSWORD;
-const ADMIN_TRUST_PROXY = process.env.ADMIN_TRUST_PROXY === "true";
-const ADMIN_COOKIE_SECURE = process.env.ADMIN_COOKIE_SECURE === "true";
-const ADMIN_LOGIN_WINDOW_MS = process.env.ADMIN_LOGIN_WINDOW_MS
-  ? parseInt(process.env.ADMIN_LOGIN_WINDOW_MS, 10)
-  : 10 * 60 * 1000;
-const ADMIN_LOGIN_MAX_ATTEMPTS = process.env.ADMIN_LOGIN_MAX_ATTEMPTS
-  ? parseInt(process.env.ADMIN_LOGIN_MAX_ATTEMPTS, 10)
-  : 6;
-
-if (ADMIN_SESSION_SECRET === "change-me-in-production") {
-  console.warn("⚠️ ADMIN_SESSION_SECRET is using the default value. Set a strong secret for production.");
-}
-
-const adminAuthDb = new sqlite3.Database(ADMIN_AUTH_DB_PATH);
-
-function runDb(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    adminAuthDb.run(sql, params, function onRun(err) {
-      if (err) {
-        reject(err);
-        return;
-      }
-      resolve(this);
-    });
-  });
-}
-
-function getDb(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    adminAuthDb.get(sql, params, (err, row) => {
-      if (err) {
-        reject(err);
-        return;
-      }
-      resolve(row);
-    });
-  });
-}
-
-async function bootstrapAdminUser() {
-  const userCountRow = await getDb("SELECT COUNT(*) AS count FROM admin_users");
-  if (userCountRow.count > 0) {
-    return;
-  }
-
-  if (!ADMIN_BOOTSTRAP_USERNAME || !ADMIN_BOOTSTRAP_PASSWORD) {
-    // Keep the data plane running; admin logins fail until a user exists.
-    console.warn(
-      "⚠️ No admin users found. Set ADMIN_BOOTSTRAP_USERNAME and ADMIN_BOOTSTRAP_PASSWORD to create one; admin login is disabled until then.",
-    );
-    return;
-  }
-
-  const passwordHash = await bcrypt.hash(ADMIN_BOOTSTRAP_PASSWORD, 12);
-  await runDb(
-    "INSERT INTO admin_users (username, password_hash, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-    [ADMIN_BOOTSTRAP_USERNAME, passwordHash],
-  );
-
-  console.log(`✅ Bootstrapped initial admin user '${ADMIN_BOOTSTRAP_USERNAME}'`);
-}
-
-async function initializeAdminAuth() {
-  await runDb(
-    `
-      CREATE TABLE IF NOT EXISTS admin_users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT NOT NULL UNIQUE,
-        password_hash TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        last_login_at TEXT
-      )
-    `,
-  );
-
-  await bootstrapAdminUser();
-
-  passport.use(
-    new LocalStrategy(async (username, password, done) => {
-      try {
-        const user = await getDb(
-          "SELECT id, username, password_hash FROM admin_users WHERE username = ?",
-          [username],
-        );
-        if (!user) {
-          done(null, false, {
-            message: "Invalid username or password",
-          });
-          return;
-        }
-
-        const validPassword = await bcrypt.compare(password, user.password_hash);
-        if (!validPassword) {
-          done(null, false, {
-            message: "Invalid username or password",
-          });
-          return;
-        }
-
-        await runDb("UPDATE admin_users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?", [user.id]);
-        done(null, {
-          id: user.id,
-          username: user.username,
-        });
-      } catch (error) {
-        done(error);
-      }
-    }),
-  );
-
-  passport.serializeUser((user, done) => {
-    done(null, user.id);
-  });
-
-  passport.deserializeUser(async (id, done) => {
-    try {
-      const user = await getDb("SELECT id, username FROM admin_users WHERE id = ?", [id]);
-      done(null, user || false);
-    } catch (error) {
-      done(error);
-    }
-  });
-}
-
-const loginAttemptByKey = new Map();
-
-function getLoginAttemptKey(req, username) {
-  return `${req.ip || req.socket.remoteAddress || "unknown"}:${username || "unknown"}`;
-}
-
-function cleanupLoginAttempts(nowMs) {
-  for (const [key, attempt] of loginAttemptByKey.entries()) {
-    if (nowMs - attempt.firstAttemptAt > ADMIN_LOGIN_WINDOW_MS) {
-      loginAttemptByKey.delete(key);
-    }
-  }
-}
-
-function isRateLimited(req, username) {
-  const nowMs = Date.now();
-  cleanupLoginAttempts(nowMs);
-  const key = getLoginAttemptKey(req, username);
-  const attempt = loginAttemptByKey.get(key);
-  return attempt ? attempt.count >= ADMIN_LOGIN_MAX_ATTEMPTS : false;
-}
-
-function registerFailedLogin(req, username) {
-  const nowMs = Date.now();
-  const key = getLoginAttemptKey(req, username);
-  const existing = loginAttemptByKey.get(key);
-  if (!existing || nowMs - existing.firstAttemptAt > ADMIN_LOGIN_WINDOW_MS) {
-    loginAttemptByKey.set(key, {
-      count: 1,
-      firstAttemptAt: nowMs,
-    });
-    return;
-  }
-  existing.count += 1;
-}
-
-function clearFailedLogins(req, username) {
-  loginAttemptByKey.delete(getLoginAttemptKey(req, username));
-}
-
-function requireAdminAuth(req, res, next) {
-  if (req.isAuthenticated && req.isAuthenticated()) {
-    next();
-    return;
-  }
-
-  res.status(401).json({
-    error: "Unauthorized",
-  });
-}
 
 // Admin server
 let nextRuleId = 1;
@@ -2935,228 +2711,13 @@ async function startUdpForward(rule) {
   });
 }
 
-const adminApp = express();
-
-if (ADMIN_TRUST_PROXY) {
-  adminApp.set("trust proxy", 1);
-}
-
-adminApp.use(express.json({
-  limit: "64kb",
-}));
-adminApp.use(express.urlencoded({
-  extended: false,
-}));
-adminApp.use(
-  session({
-    name: "admin.sid",
-    secret: ADMIN_SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      secure: ADMIN_COOKIE_SECURE,
-      sameSite: "strict",
-      maxAge: 8 * 60 * 60 * 1000,
-    },
-  }),
-);
-adminApp.use(passport.initialize());
-adminApp.use(passport.session());
-
-adminApp.get("/", (_req, res) => {
-  res.sendFile(path.join(__dirname, "admin.html"));
-});
-
-adminApp.get("/api/auth/status", (req, res) => {
-  const authenticated = req.isAuthenticated && req.isAuthenticated();
-  if (!authenticated) {
-    res.status(200).json({
-      authenticated: false,
-    });
-    return;
-  }
-
-  res.status(200).json({
-    authenticated: true,
-    username: req.user.username,
-  });
-});
-
-adminApp.post("/api/login", (req, res, next) => {
-  const username = typeof req.body.username === "string" ? req.body.username.trim() : "";
-  const password = typeof req.body.password === "string" ? req.body.password : "";
-
-  if (!username || !password) {
-    res.status(400).json({
-      error: "Username and password are required",
-    });
-    return;
-  }
-
-  if (isRateLimited(req, username)) {
-    res.status(429).json({
-      error: "Too many failed login attempts. Please try again later.",
-    });
-    return;
-  }
-
-  passport.authenticate("local", (err, user) => {
-    if (err) {
-      next(err);
-      return;
-    }
-    if (!user) {
-      registerFailedLogin(req, username);
-      res.status(401).json({
-        error: "Invalid username or password",
-      });
-      return;
-    }
-    req.logIn(user, (loginErr) => {
-      if (loginErr) {
-        next(loginErr);
-        return;
-      }
-      clearFailedLogins(req, username);
-      res.status(200).json({
-        ok: true,
-        username: user.username,
-      });
-    });
-  })(req, res, next);
-});
-
-adminApp.post("/api/logout", (req, res, next) => {
-  req.logout((logoutErr) => {
-    if (logoutErr) {
-      next(logoutErr);
-      return;
-    }
-    req.session.destroy((destroyErr) => {
-      if (destroyErr) {
-        next(destroyErr);
-        return;
-      }
-      res.clearCookie("admin.sid");
-      res.status(200).json({
-        ok: true,
-      });
-    });
-  });
-});
-
-adminApp.use("/api", requireAdminAuth);
-
-adminApp.get("/api/sessions", (_req, res) => {
-  const sessions = [];
-  activeSessions.forEach((session, sessionId) => {
-    sessions.push({
-      sessionId,
-      clientIP: session.clientIP,
-      vmIP: session.vmIP,
-      vmMAC: session.vmMAC,
-      bytesSent: session.bytesSent,
-      bytesReceived: session.bytesReceived,
-      udpFlowCount: session.udpFlows.size,
-      udpDroppedPackets: session.udpFlows.droppedPackets,
-      udpSendErrors: session.udpFlows.sendErrors,
-      nickname: session.nickname,
-    });
-  });
-  res.status(200).json(sessions);
-});
-
-adminApp.post("/api/sessions/:sessionId/nickname", (req, res) => {
-  const session = activeSessions.get(req.params.sessionId);
-  if (!session) {
-    res.sendStatus(404);
-    return;
-  }
-  const nickname = typeof req.body.nickname === "string" ? req.body.nickname.trim() : "";
-  session.nickname = nickname || undefined;
-  res.sendStatus(200);
-});
-
-adminApp.delete("/api/sessions/:sessionId/nickname", (req, res) => {
-  const session = activeSessions.get(req.params.sessionId);
-  if (!session) {
-    res.sendStatus(404);
-    return;
-  }
-  session.nickname = undefined;
-  res.sendStatus(204);
-});
-
-adminApp.get("/api/rules", (_req, res) => {
-  res.status(200).json(proxyRules);
-});
-
-adminApp.post("/api/rules", (req, res) => {
-  const rule = req.body;
-  if (!rule || !rule.type) {
-    res.status(400).json({
-      error: "Rule type is required",
-    });
-    return;
-  }
-
-  if (rule.type === "port") {
-    if (!Array.isArray(rule.protocols) || rule.protocols.length === 0) {
-      res.status(400).json({
-        error: "At least one protocol is required for port rules",
-      });
-      return;
-    }
-  }
-
-  rule.id = nextRuleId++;
-  proxyRules.push(rule);
-  if (rule.type === "port") {
-    startPortForward(rule);
-  }
-
-  res.sendStatus(201);
-});
-
-adminApp.delete("/api/rules/:id", (req, res) => {
-  const id = parseInt(req.params.id, 10);
-  const index = proxyRules.findIndex((rule) => rule.id === id);
-  if (index === -1) {
-    res.sendStatus(404);
-    return;
-  }
-
-  const rule = proxyRules[index];
-  if (rule.type === "port") {
-    stopPortForward(rule);
-  } else {
-    // Legacy support for old tcp/udp rules
-    stopTcpForward(rule.id);
-    stopUdpForward(rule.id);
-  }
-  proxyRules.splice(index, 1);
-  res.sendStatus(204);
-});
-
-adminApp.use((err, _req, res, _next) => {
-  console.error(`Admin API error: ${err.message}`);
-  res.status(500).json({
-    error: "Internal server error",
-  });
-});
-
-async function startAdminServer() {
-  await initializeAdminAuth();
-  const adminServer = http.createServer(adminApp);
-  adminServer.listen(ADMIN_PORT, ADMIN_BIND_ADDRESS, () => {
-    console.log(`💡 Admin UI listening on http://${ADMIN_BIND_ADDRESS}:${ADMIN_PORT}`);
-  });
-}
-
-startAdminServer().catch((err) => {
-  console.error(`Failed to start admin server: ${err.message}`);
-  process.exit(1);
+// HOSTED: the admin API and UI live in ./admin/app.js.
+hosted.startAdmin({
+  proxyRules,
+  startPortForward,
+  stopPortForward,
+  stopTcpForward,
+  stopUdpForward,
 });
 
 function findProxyRule(req) {
@@ -3429,7 +2990,7 @@ proxyServer.on("upgrade", async (req, socket, head) => {
   }
 });
 
-proxyServer.listen(PROXY_PORT, PROXY_BIND_ADDRESS, () => {
+if (hosted.config.inboundRulesEnabled) proxyServer.listen(PROXY_PORT, PROXY_BIND_ADDRESS, () => { // HOSTED
   console.log(
     `💡 Proxy server listening on http://${PROXY_BIND_ADDRESS}:${PROXY_PORT}`,
   );

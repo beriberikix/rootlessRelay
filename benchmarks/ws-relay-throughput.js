@@ -2,6 +2,8 @@
 "use strict";
 
 const { spawn } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
 const http = require("node:http");
 const net = require("node:net");
 const path = require("node:path");
@@ -242,10 +244,52 @@ async function sendFor(
   return { sentPackets, start, sendEnd: performance.now() };
 }
 
+// The admin API requires a login session. The spawned relay bootstraps a
+// throwaway admin user and the cookie is kept for getRelayBytes.
+const ADMIN_TEST_USER = "bench-admin";
+const ADMIN_TEST_PASSWORD = "bench-admin-password";
+const ADMIN_TEST_SECRET = "bench-session-secret";
+let adminCookie = null;
+
+function adminLogin(port) {
+  const body = JSON.stringify({ username: ADMIN_TEST_USER, password: ADMIN_TEST_PASSWORD });
+  const deadline = Date.now() + 5000;
+  return new Promise((resolve, reject) => {
+    const attempt = () => {
+      const request = http.request({
+        host: "127.0.0.1",
+        port,
+        path: "/api/login",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+        },
+      }, (response) => {
+        response.resume();
+        response.once("end", () => {
+          const cookie = (response.headers["set-cookie"] || [])
+            .map((value) => value.split(";")[0])
+            .join("; ");
+          if (response.statusCode === 200 && cookie) resolve(cookie);
+          else reject(new Error(`Admin login failed: ${response.statusCode}`));
+        });
+      });
+      request.once("error", (error) => {
+        if (Date.now() >= deadline) reject(error);
+        else setTimeout(attempt, 20);
+      });
+      request.end(body);
+    };
+    attempt();
+  });
+}
+
 function getRelayBytes(adminPort) {
   return new Promise((resolve, reject) => {
     const request = http.get(
       `http://127.0.0.1:${adminPort}/api/sessions`,
+      { headers: adminCookie ? { Cookie: adminCookie } : {} },
       (response) => {
         let body = "";
         response.setEncoding("utf8");
@@ -419,10 +463,18 @@ async function runBenchmark(options) {
   const destinationPort = receiverInfo.port;
   const wsPort = await freeTcpPort();
   const adminPort = await freeTcpPort();
+  const adminDbPath = path.join(
+    os.tmpdir(),
+    `rootlessrelay-bench-${process.pid}-${adminPort}.sqlite`,
+  );
   const child = spawn(process.execPath, [path.join(ROOT, "relay.js")], {
     cwd: ROOT,
     env: {
       ...process.env,
+      ADMIN_SESSION_SECRET: ADMIN_TEST_SECRET,
+      ADMIN_BOOTSTRAP_USERNAME: ADMIN_TEST_USER,
+      ADMIN_BOOTSTRAP_PASSWORD: ADMIN_TEST_PASSWORD,
+      ADMIN_AUTH_DB_PATH: adminDbPath,
       ENABLE_WSS: "false",
       ENABLE_VM_TO_VM: "false",
       LOG_LEVEL: "0",
@@ -444,6 +496,7 @@ async function runBenchmark(options) {
   let ws;
   try {
     ws = await waitForRelay(`ws://127.0.0.1:${wsPort}`, child);
+    adminCookie = await adminLogin(adminPort);
     const results = [];
     let marker = 1;
     const markerState = {
@@ -483,6 +536,8 @@ async function runBenchmark(options) {
     if (ws && ws.readyState !== WebSocket.CLOSED) ws.close();
     await receiver.close();
     await stopChild(child);
+    adminCookie = null;
+    fs.rm(adminDbPath, { force: true }, () => {});
   }
 }
 

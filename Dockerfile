@@ -33,8 +33,8 @@ USER node
 
 EXPOSE 8086 8001 8080
 
-# Readiness: the WebSocket listener accepts TCP connections.
+# Readiness: the public listener answers /healthz with 200 (503 while shutting down).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD node -e "require('net').connect(process.env.WS_PORT, '127.0.0.1').once('connect', () => process.exit(0)).once('error', () => process.exit(1))"
+  CMD node -e "require('http').get({host:'127.0.0.1',port:process.env.WS_PORT,path:'/healthz'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 
 CMD ["node", "relay.js"]
