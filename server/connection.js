@@ -22,9 +22,24 @@ function createSessionRegistry({ ctx, tiers }) {
   }
 
   function poolInUse() {
-    // usedIPs always contains the gateway's last octet.
-    return Math.max(0, ctx.usedIPs.size - 1);
+    // usedIPs always contains the gateway's last octet. Sessions that have
+    // not taken an address yet (before DHCP) will, so they count too.
+    let waiting = 0;
+    for (const session of sessions.values()) if (!session.vmIP) waiting += 1;
+    return Math.max(0, ctx.usedIPs.size - 1) + waiting;
   }
+
+  // Slots held between admission and registration. Admission awaits the quota
+  // check and the WebSocket handshake before the session exists, so without
+  // these, parallel upgrades would all pass the same caps.
+  const reservedByOwner = new Map();
+  const reservedByIP = new Map();
+  let reservedTotal = 0;
+  const bump = (map, key, delta) => {
+    const next = (map.get(key) || 0) + delta;
+    if (next <= 0) map.delete(key);
+    else map.set(key, next);
+  };
 
   return {
     sessions,
@@ -35,11 +50,13 @@ function createSessionRegistry({ ctx, tiers }) {
     },
     countFor(owner) {
       const set = byOwner.get(owner);
-      return set ? set.size : 0;
+      return (set ? set.size : 0) + (reservedByOwner.get(owner) || 0);
     },
     countForIP(ip) {
-      return perIP.get(ip) || 0;
+      return (perIP.get(ip) || 0) + (reservedByIP.get(ip) || 0);
     },
+    // On success the caller holds a reservation and must call release()
+    // once: after registering the session, or when the upgrade fails.
     admit({ identity, clientIP }) {
       const tier = tiers[identity.tier] || tiers.user;
       if (tier.maxSessionsPerIP !== null && this.countForIP(clientIP) >= tier.maxSessionsPerIP) {
@@ -48,10 +65,21 @@ function createSessionRegistry({ ctx, tiers }) {
       if (tier.maxSessionsPerOwner !== null && this.countFor(identity.owner) >= tier.maxSessionsPerOwner) {
         return { ok: false, status: 429, reason: "session limit reached for this account" };
       }
-      if (poolInUse() >= poolCapacity()) {
+      if (poolInUse() + reservedTotal >= poolCapacity()) {
         return { ok: false, status: 503, reason: "address pool exhausted" };
       }
-      return { ok: true };
+      bump(reservedByOwner, identity.owner, 1);
+      bump(reservedByIP, clientIP, 1);
+      reservedTotal += 1;
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        bump(reservedByOwner, identity.owner, -1);
+        bump(reservedByIP, clientIP, -1);
+        reservedTotal -= 1;
+      };
+      return { ok: true, release };
     },
     add(session) {
       sessions.set(session.sessionId, session);
@@ -76,6 +104,17 @@ function createSessionRegistry({ ctx, tiers }) {
       if (!session) return false;
       session.ws.close(code, reason);
       return true;
+    },
+    // Closes the sessions that authenticated with one API token.
+    killToken(tokenId, code = 1008, reason = "token revoked") {
+      let count = 0;
+      for (const session of sessions.values()) {
+        if (session.identity && session.identity.tokenId === tokenId) {
+          session.ws.close(code, reason);
+          count += 1;
+        }
+      }
+      return count;
     },
     killOwner(owner, code = 1008, reason = "account suspended") {
       const set = byOwner.get(owner);
@@ -105,11 +144,7 @@ function attachConnectionHandler(wss, {
 }) {
   wss.on("connection", (ws, req, extra = {}) => {
     const identity = extra.identity || LOCAL_IDENTITY;
-    const clientIP = extra.clientIP || resolveClientIP(req, {
-      trustProxy: config.trustProxy,
-      hops: config.trustProxyHops,
-      header: config.clientIpHeader,
-    });
+    const clientIP = extra.clientIP || resolveClientIP(req, config.clientIpOptions || {});
     const tier = tiers[identity.tier] || tiers.user;
 
     try {
@@ -133,6 +168,7 @@ function attachConnectionHandler(wss, {
     session.policy.applyToSession(session);
     ctx.activeSessions.set(sessionId, session);
     registry.add(session);
+    extra.release?.();
     usage?.track(session);
     metrics?.sessionsGauge?.inc({ tier: identity.tier });
     log?.info("session opened", {

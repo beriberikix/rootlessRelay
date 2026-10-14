@@ -163,19 +163,31 @@ function createAnonIssuer({
 
 // External OIDC provider: verify signature via (remote) JWKS plus issuer and
 // audience. `jwks` is injectable so tests can use a local key set.
-function createJwtVerifier({ issuer, audience, jwksUrl, usernameClaim = "email", jwks = null, now = Date.now }) {
+function createJwtVerifier({
+  issuer,
+  audience,
+  jwksUrl,
+  usernameClaim = "email",
+  verifiedClaim = null,
+  algorithms = ["RS256"],
+  jwks = null,
+  now = Date.now,
+}) {
   const keySet = jwks || jose.createRemoteJWKSet(new URL(jwksUrl));
   return {
     issuer,
     async verify(token) {
       let payload;
       try {
-        ({ payload } = await jose.jwtVerify(token, keySet, { issuer, audience, currentDate: new Date(now()) }));
+        ({ payload } = await jose.jwtVerify(token, keySet, { issuer, audience, algorithms, currentDate: new Date(now()) }));
       } catch (error) {
         throw new AuthError(401, "invalid-jwt", error.message);
       }
       if (!payload.sub) throw new AuthError(401, "invalid-jwt", "missing sub");
-      const username = typeof payload[usernameClaim] === "string" ? payload[usernameClaim] : null;
+      // With verifiedClaim set, an address the IdP has not verified is not used
+      // as the username (it could impersonate someone else's email).
+      const verified = verifiedClaim === null || payload[verifiedClaim] === true;
+      const username = verified && typeof payload[usernameClaim] === "string" ? payload[usernameClaim] : null;
       return { iss: payload.iss, sub: payload.sub, username, claims: payload };
     },
   };
@@ -224,7 +236,7 @@ function createAuthenticator({ config, users, apiTokens, anon = null, jwt = null
       if (!result) throw new AuthError(401, "invalid-token");
       if (!result.user) throw new AuthError(401, result.reason || "invalid-token");
       checkStatus(result.user, allowPending);
-      return identityForUser(result.user, "api-token");
+      return { ...identityForUser(result.user, "api-token"), tokenId: result.token.id };
     }
 
     let unverified;

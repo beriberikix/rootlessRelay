@@ -351,6 +351,10 @@ test("operator flow: users, tokens, sessions list, kill, ban, rules disabled", N
     assert.equal((await httpJson(relay.adminPort, { method: "DELETE", path: `/api/invites/${invite.body.id}`, cookie })).status, 204);
     assert.equal((await httpJson(relay.adminPort, { method: "DELETE", path: `/api/invites/${invite.body.id}`, cookie })).status, 404);
     assert.equal((await httpJson(relay.adminPort, { path: "/api/config", cookie })).body.signupMode, "open");
+    const forged = await httpJson(relay.adminPort, { method: "POST", path: "/api/invites", cookie, body: {}, headers: { Origin: "http://localhost:9999" } });
+    assert.equal(forged.status, 403, "cross-origin state changes are refused");
+    const sameOrigin = await httpJson(relay.adminPort, { method: "POST", path: "/api/invites", cookie, body: {}, headers: { Origin: `http://127.0.0.1:${relay.adminPort}` } });
+    assert.equal(sameOrigin.status, 201);
     assert.equal((await httpJson(relay.adminPort, { path: "/api/audit?dstIp=1.2.3.4&at=2026-10-14T00:00:00Z&windowMinutes=10", cookie })).status, 200);
     assert.equal((await httpJson(relay.adminPort, { path: "/api/audit?at=yesterday", cookie })).status, 400);
     assert.equal((await httpJson(relay.adminPort, { path: "/api/audit?dstPort=70000", cookie })).status, 400);
@@ -398,14 +402,26 @@ test("account API: a user sees and manages only their own sessions and tokens", 
     assert.equal((await httpJson(relay.wsPort, { method: "DELETE", path: `/api/me/sessions/${sessionId}`, headers: asDave })).status, 204);
     assert.deepEqual(await closed, { code: 1008, reason: "terminated by account owner" });
 
-    const created = await httpJson(relay.wsPort, { method: "POST", path: "/api/me/tokens", headers: asDave, body: { name: "laptop", expiresInDays: 7 } });
-    assert.equal(created.status, 201);
-    assert.equal((await openWebSocket(relay.wsPort, { token: created.body.token })).status, 101);
+    // An API token alone cannot mint or revoke tokens (that needs a sign-in).
+    const minted = await httpJson(relay.wsPort, { method: "POST", path: "/api/me/tokens", headers: asDave, body: { name: "laptop" } });
+    assert.equal(minted.status, 403);
+    assert.equal(minted.body.error, "sign-in-required");
+    const created = (await httpJson(relay.adminPort, { method: "POST", path: `/api/users/${dave.id}/tokens`, cookie, body: { name: "laptop" } })).body;
+    assert.equal((await httpJson(relay.wsPort, { method: "DELETE", path: `/api/me/tokens/${created.id}`, headers: asDave })).status, 403);
     const list = await httpJson(relay.wsPort, { path: "/api/me/tokens", headers: asDave });
     assert.deepEqual(list.body.map((t) => t.name), ["seed", "laptop"]);
-    assert.equal((await httpJson(relay.wsPort, { method: "DELETE", path: `/api/me/tokens/${created.body.id}`, headers: asErin })).status, 404);
-    assert.equal((await httpJson(relay.wsPort, { method: "DELETE", path: `/api/me/tokens/${created.body.id}`, headers: asDave })).status, 204);
-    assert.equal((await openWebSocket(relay.wsPort, { token: created.body.token })).status, 401);
+
+    // Revoking a token closes the sessions opened with it, not the others.
+    const viaLaptop = await openWebSocket(relay.wsPort, { token: created.token });
+    const viaSeed = await openWebSocket(relay.wsPort, { bearer: daveToken });
+    assert.equal(viaLaptop.status, 101);
+    assert.equal(viaSeed.status, 101);
+    const laptopClosed = new Promise((resolve) => viaLaptop.ws.once("close", (code, reason) => resolve({ code, reason: reason.toString() })));
+    assert.equal((await httpJson(relay.adminPort, { method: "DELETE", path: `/api/tokens/${created.id}`, cookie })).status, 204);
+    assert.deepEqual(await laptopClosed, { code: 1008, reason: "token revoked" });
+    assert.equal(viaSeed.ws.readyState, 1, "sessions on other tokens stay up");
+    viaSeed.ws.close();
+    assert.equal((await openWebSocket(relay.wsPort, { token: created.token })).status, 401);
 
     const usage = await httpJson(relay.wsPort, { path: "/api/me/usage", headers: asDave });
     assert.equal(usage.status, 200);

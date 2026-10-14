@@ -165,8 +165,29 @@ function createAdminApp({
 
   if (config.adminTrustProxy) app.set("trust proxy", 1);
 
+  // CSRF: the panel only sends JSON via fetch, so form-encoded bodies are not
+  // parsed, and a state-changing request that carries an Origin must come
+  // from this host. (Behind `fly proxy` the operator uses localhost, where a
+  // page on another local port is "same-site" and SameSite cookies alone do
+  // not stop it.) Requests without Origin (CLI, tests) are not browsers.
   app.use(express.json({ limit: "64kb" }));
-  app.use(express.urlencoded({ extended: false }));
+  app.use((req, res, next) => {
+    if (["GET", "HEAD", "OPTIONS"].includes(req.method) || !req.headers.origin) {
+      next();
+      return;
+    }
+    let originHost = null;
+    try {
+      originHost = new URL(req.headers.origin).host;
+    } catch (_error) {
+      originHost = null;
+    }
+    if (originHost !== req.headers.host) {
+      res.status(403).json({ error: "cross-origin request refused" });
+      return;
+    }
+    next();
+  });
   app.use(
     expressSession({
       name: "admin.sid",
@@ -390,7 +411,8 @@ function createAdminApp({
       res.sendStatus(404);
       return;
     }
-    log?.info("api token revoked", { tokenId: id, by: req.user.username });
+    const killed = registry && registry.killToken ? registry.killToken(id, 1008, "token revoked") : 0;
+    log?.info("api token revoked", { tokenId: id, killedSessions: killed, by: req.user.username });
     res.sendStatus(204);
   }));
 

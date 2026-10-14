@@ -204,11 +204,7 @@ function createPublicServer({
       }
       try {
         const body = await readJsonBody(req);
-        const clientIP = resolveClientIP(req, {
-          trustProxy: config.trustProxy,
-          hops: config.trustProxyHops,
-          header: config.clientIpHeader,
-        });
+        const clientIP = resolveClientIP(req, config.clientIpOptions);
         const result = await handleAnonToken({ body, clientIP, req });
         writeJson(res, 200, result, corsHeaders(req));
       } catch (error) {
@@ -224,11 +220,7 @@ function createPublicServer({
         writeJson(res, 403, { error: "origin not allowed" });
         return;
       }
-      const clientIP = resolveClientIP(req, {
-        trustProxy: config.trustProxy,
-        hops: config.trustProxyHops,
-        header: config.clientIpHeader,
-      });
+      const clientIP = resolveClientIP(req, config.clientIpOptions);
       await userApi.handle(req, res, { path, clientIP, corsHeaders: corsHeaders(req) });
       return;
     }
@@ -239,6 +231,11 @@ function createPublicServer({
   const server = tls
     ? https.createServer(tls, requestHandler)
     : http.createServer(requestHandler);
+  // Bound how long a client may take to send headers, so slow connections
+  // cannot hold proxy slots before authenticating. Upgraded sockets leave
+  // the HTTP server and are not affected.
+  server.headersTimeout = 10000;
+  server.requestTimeout = 15000;
 
   const wss = new WebSocket.Server({
     noServer: true,
@@ -253,11 +250,7 @@ function createPublicServer({
         rejectUpgrade(socket, 503, "server shutting down");
         return;
       }
-      const clientIP = resolveClientIP(req, {
-        trustProxy: config.trustProxy,
-        hops: config.trustProxyHops,
-        header: config.clientIpHeader,
-      });
+      const clientIP = resolveClientIP(req, config.clientIpOptions);
       if (req.headers.origin && !originAllowed(req.headers.origin)) {
         log?.warn("upgrade rejected: origin", { clientIP, origin: req.headers.origin });
         rejectUpgrade(socket, 403, "origin not allowed");
@@ -274,6 +267,7 @@ function createPublicServer({
         identity = await authenticate(credential ? credential.token : null, { clientIP, req });
       }
 
+      let admitted = null;
       if (admission) {
         const verdict = await admission.admit({ identity, clientIP });
         if (!verdict.ok) {
@@ -282,10 +276,15 @@ function createPublicServer({
           rejectUpgrade(socket, verdict.status, verdict.reason);
           return;
         }
+        admitted = verdict;
       }
 
+      // The admission reservation is released by the connection handler once
+      // the session is registered, or here if the handshake never completes.
+      const release = admitted && admitted.release ? admitted.release : null;
+      if (release) socket.once("close", release);
       wss.handleUpgrade(req, socket, head, (ws) => {
-        wss.emit("connection", ws, req, { identity, clientIP });
+        wss.emit("connection", ws, req, { identity, clientIP, release });
       });
     } catch (error) {
       if (error instanceof AuthError || (error && error.status)) {

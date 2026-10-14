@@ -98,6 +98,8 @@ test("partial JWT configuration is rejected and full configuration parsed", () =
     audience: "relay",
     jwksUrl: "https://issuer/.well-known/jwks.json",
     usernameClaim: "email",
+    verifiedClaim: null,
+    algorithms: ["RS256"],
     defaultTier: "user",
   });
 });

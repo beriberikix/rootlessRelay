@@ -148,7 +148,7 @@ test("authenticator dispatches API tokens, anon tokens and external JWTs", async
   const alice = await users.create({ username: "alice", password: "password-1" });
   const created = await apiTokens.create({ userId: alice.id });
   const viaToken = await authenticate(created.token, { clientIP: "1.1.1.1" });
-  assert.deepEqual(viaToken, { kind: "user", owner: `user:${alice.id}`, userId: alice.id, username: "alice", tier: "user", status: "active", via: "api-token" });
+  assert.deepEqual(viaToken, { kind: "user", owner: `user:${alice.id}`, userId: alice.id, username: "alice", tier: "user", status: "active", via: "api-token", tokenId: created.id });
   await users.setStatus(alice.id, "banned");
   await assert.rejects(authenticate(created.token, {}), (error) => error.status === 403);
 
@@ -222,4 +222,36 @@ test("turnstile verification calls the siteverify endpoint", async () => {
   assert.equal(await verifyTurnstile({ secret: "s", token: "", fetchFn }), false);
   assert.match(calls[0].url, /turnstile/);
   assert.match(calls[0].body, /remoteip=1\.1\.1\.1/);
+});
+
+test("external JWTs: unverified emails are not used as usernames; algorithms are pinned", async () => {
+  const { privateKey, publicKey } = await jose.generateKeyPair("RS256");
+  const jwk = await jose.exportJWK(publicKey);
+  const clock = 1_700_000_000_000;
+  const verifier = createJwtVerifier({
+    issuer: "https://idp.example",
+    audience: "relay",
+    jwksUrl: "https://idp.example/jwks",
+    usernameClaim: "email",
+    verifiedClaim: "email_verified",
+    jwks: jose.createLocalJWKSet({ keys: [jwk] }),
+    now: () => clock,
+  });
+  const sign = (claims, alg = "RS256", key = privateKey) => new jose.SignJWT(claims)
+    .setProtectedHeader({ alg })
+    .setIssuer("https://idp.example")
+    .setAudience("relay")
+    .setSubject("sub-1")
+    .setExpirationTime(Math.floor(clock / 1000) + 300)
+    .sign(key);
+  assert.equal((await verifier.verify(await sign({ email: "a@example.com", email_verified: true }))).username, "a@example.com");
+  assert.equal((await verifier.verify(await sign({ email: "a@example.com", email_verified: false }))).username, null);
+  assert.equal((await verifier.verify(await sign({ email: "a@example.com" }))).username, null);
+  const ps = await jose.generateKeyPair("PS256");
+  const psJwk = { ...(await jose.exportJWK(ps.publicKey)), alg: "PS256" };
+  const mixed = createJwtVerifier({
+    issuer: "https://idp.example", audience: "relay", jwksUrl: "https://idp.example/jwks",
+    jwks: jose.createLocalJWKSet({ keys: [psJwk] }), now: () => clock,
+  });
+  await assert.rejects(mixed.verify(await sign({}, "PS256", ps.privateKey)), (error) => error.code === "invalid-jwt", "only RS256 by default");
 });

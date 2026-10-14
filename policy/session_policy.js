@@ -14,6 +14,13 @@ const { buildIPv4Packet, tcpChecksum } = require("../packet_utils");
 const WS_OPEN = 1;
 const DHCP_SERVER_PORT = 67;
 const DENY_AUDIT_INTERVAL_MS = 10000;
+// Audit volume caps per session, so a VM cannot fill the disk or memory with
+// rows: denied attempts beyond the budget are summarised once per minute;
+// allowed connections beyond theirs are counted in the same summary.
+const AUDIT_WINDOW_MS = 60000;
+const DENY_AUDIT_PER_WINDOW = 30;
+const ALLOW_AUDIT_PER_WINDOW = 600;
+const DENIED_KEYS_MAX = 1024;
 
 function unlimitedLimiter() {
   return { tryConsume: () => true, get usage() { return 0; } };
@@ -75,7 +82,8 @@ class SessionPolicy {
     this.dnsServers = tier.dnsServers ? new Set(tier.dnsServers) : null;
 
     this.pendingConnects = new Map(); // connKey -> { startedAt, dstIP, dstPort }
-    this.deniedAt = new Map(); // "ip:port" -> last audit time
+    this.deniedAt = new Map(); // "proto:ip:port" -> last audit time, at most DENIED_KEYS_MAX
+    this.auditWindow = { start: now(), deny: 0, allow: 0, suppressedDeny: 0, suppressedAllow: 0 };
     this.counters = {
       spoofDrops: 0,
       macDrops: 0,
@@ -227,16 +235,18 @@ class SessionPolicy {
 
     const connKey = `${srcPort}:${dstIP}:${dstPort}`;
     this.pendingConnects.set(connKey, { startedAt: this.now(), dstIP, dstPort });
-    this.audit?.record({
-      owner: this.identity.owner,
-      sessionId: session.sessionId,
-      proto: "tcp",
-      dstIP,
-      dstPort,
-      verdict: "allow",
-      startedAt: this.now(),
-      key: `${session.sessionId}:${connKey}`,
-    });
+    if (this.audit && this.takeAuditSlot(session, "allow")) {
+      this.audit.record({
+        owner: this.identity.owner,
+        sessionId: session.sessionId,
+        proto: "tcp",
+        dstIP,
+        dstPort,
+        verdict: "allow",
+        startedAt: this.now(),
+        key: `${session.sessionId}:${connKey}`,
+      });
+    }
     return true;
   }
 
@@ -337,6 +347,44 @@ class SessionPolicy {
     }
     this.pendingConnects.clear();
     this.deniedAt.clear();
+    if (this.audit) this.flushAuditSummary(session);
+  }
+
+  // Writes one row summarising audit rows skipped in the last window.
+  flushAuditSummary(session) {
+    const w = this.auditWindow;
+    if (w.suppressedDeny === 0 && w.suppressedAllow === 0) return;
+    this.audit.record({
+      owner: this.identity.owner,
+      sessionId: session.sessionId,
+      proto: "summary",
+      dstIP: "0.0.0.0",
+      dstPort: 0,
+      verdict: `suppressed:deny=${w.suppressedDeny}:allow=${w.suppressedAllow}`,
+      startedAt: w.start,
+      endedAt: this.now(),
+    });
+    w.suppressedDeny = 0;
+    w.suppressedAllow = 0;
+  }
+
+  takeAuditSlot(session, kind) {
+    const now = this.now();
+    const w = this.auditWindow;
+    if (now - w.start >= AUDIT_WINDOW_MS) {
+      this.flushAuditSummary(session);
+      w.start = now;
+      w.deny = 0;
+      w.allow = 0;
+    }
+    const limit = kind === "deny" ? DENY_AUDIT_PER_WINDOW : ALLOW_AUDIT_PER_WINDOW;
+    if (w[kind] >= limit) {
+      if (kind === "deny") w.suppressedDeny += 1;
+      else w.suppressedAllow += 1;
+      return false;
+    }
+    w[kind] += 1;
+    return true;
   }
 
   recordDenied(session, proto, dstIP, dstPort, reason) {
@@ -345,6 +393,11 @@ class SessionPolicy {
     const now = this.now();
     const last = this.deniedAt.get(key);
     if (last !== undefined && now - last < DENY_AUDIT_INTERVAL_MS) return;
+    if (!this.takeAuditSlot(session, "deny")) return;
+    if (this.deniedAt.size >= DENIED_KEYS_MAX) {
+      for (const [k, t] of this.deniedAt) if (now - t >= DENY_AUDIT_INTERVAL_MS) this.deniedAt.delete(k);
+      if (this.deniedAt.size >= DENIED_KEYS_MAX) this.deniedAt.clear();
+    }
     this.deniedAt.set(key, now);
     this.audit.record({
       owner: this.identity.owner,

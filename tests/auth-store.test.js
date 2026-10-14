@@ -121,3 +121,15 @@ test("sqlite session store round-trips, expires, prunes and destroys", async () 
   store.close();
   await db.close();
 });
+
+test("concurrent first logins for one external identity yield one account", async () => {
+  const { openDatabase } = require("../auth/db");
+  const { createUserStore } = require("../auth/users");
+  const db = openDatabase(":memory:");
+  await db.migrate();
+  const users = createUserStore(db, { bcryptRounds: 4 });
+  const logins = await Promise.all([1, 2, 3].map(() => users.upsertExternal({ externalSub: "idp|x", username: "x@example.com" })));
+  assert.deepEqual(new Set(logins.map((u) => u.id)).size, 1);
+  assert.equal((await users.list()).length, 1);
+  await db.close();
+});

@@ -103,10 +103,13 @@ function createInviteStore(db, { now = Date.now, randomBytes = crypto.randomByte
       const normalized = normalizeInviteCode(code);
       if (!normalized) return false;
       const at = iso();
+      // One statement: also refuses if this user already redeemed a code, so
+      // concurrent redemptions with two codes cannot consume both.
       const result = await db.run(
         "UPDATE invites SET redeemed_by = ?, redeemed_at = ? WHERE code_hash = ? AND redeemed_at IS NULL " +
-          "AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)",
-        [userId, at, hashInviteCode(normalized), at],
+          "AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?) " +
+          "AND NOT EXISTS (SELECT 1 FROM invites WHERE redeemed_by = ?)",
+        [userId, at, hashInviteCode(normalized), at, userId],
       );
       return result.changes > 0;
     },

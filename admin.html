@@ -856,7 +856,7 @@
           el('td', {}, [badge(user.role, user.role)]),
           el('td', { text: user.tier }),
           el('td', {}, [badge(user.status, user.status)]),
-          el('td', { text: user.externalSub ? 'external' : (user.hasPassword ? 'password' : 'tokens only') }),
+          el('td', { text: user.externalSub ? 'external' : (user.hasPassword ? 'password' : 'tokens only'), title: user.externalSub || '' }),
           el('td', { text: formatTime(user.createdAt) }),
           el('td', { text: formatTime(user.lastLoginAt) }),
           el('td', {}, [userActions(user)]),

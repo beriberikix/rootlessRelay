@@ -288,8 +288,8 @@ Browser origins must be in `ALLOWED_ORIGINS`; CORS headers are emitted.
 | `GET /api/me/sessions` | The caller's live sessions. |
 | `DELETE /api/me/sessions/:id` | Close one of the caller's sessions (code 1008). |
 | `GET /api/me/tokens` | The caller's API tokens (never the secrets). |
-| `POST /api/me/tokens` | Create a token: `{ "name", "expiresInDays"? }`. The secret is returned once. At most 20 active tokens. |
-| `DELETE /api/me/tokens/:id` | Revoke one of the caller's tokens. |
+| `POST /api/me/tokens` | Create a token: `{ "name", "expiresInDays"? }`. The secret is returned once. At most 20 active tokens. Needs a sign-in (external JWT), not an API token. |
+| `DELETE /api/me/tokens/:id` | Revoke one of the caller's tokens and close sessions opened with it. Needs a sign-in. |
 | `POST /api/me/redeem` | Redeem an invite code: `{ "code" }`. Activates a pending account; 10 failed attempts per hour per account. |
 | `DELETE /api/me` | Delete the caller's account, tokens and usage: `{ "confirm": "<username>" }`. Needs a sign-in (external JWT), not an API token; operators are deleted from the admin panel. |
 
@@ -310,6 +310,8 @@ pending account directly.
 | `ANON_TOKEN_TTL_S`, `ANON_TOKEN_BIND_IP`, `ANON_TOKENS_PER_IP_PER_HOUR` | Anonymous token lifetime, address binding, issuance limit. | `900`, `true`, `10` | same |
 | `TURNSTILE_SECRET` | Require a Cloudflare Turnstile check to issue anonymous tokens. | unset | unset |
 | `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_JWKS_URL`, `JWT_USERNAME_CLAIM`, `JWT_DEFAULT_TIER` | External OIDC verification. | unset | unset |
+| `TRUSTED_PROXY_CIDRS`, `PEER_IP_HEADER` | Only believe `CLIENT_IP_HEADER` when the peer (socket address, or `PEER_IP_HEADER` such as `fly-client-ip`) is in these ranges, e.g. Cloudflare's. | unset | unset (warns when `TRUST_PROXY` is on) |
+| `JWT_ALGORITHMS`, `JWT_VERIFIED_CLAIM` | Allowed JWT algorithms; claim that must be `true` before the email becomes the username. | `RS256`, unset | same |
 | `SIGNUP_MODE` | `open`, or `invite` to create new external accounts as pending until they redeem an invite code. | `open` | `open` |
 | `ALLOWED_ORIGINS` | Comma-separated browser origins allowed to open sessions and request anonymous tokens. | unset | unset (warns) |
 | `ALLOW_QUERY_TOKEN` | Accept `?token=` on the upgrade URL (leaks into logs). | `false` | `false` |

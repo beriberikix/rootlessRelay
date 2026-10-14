@@ -104,8 +104,14 @@ function init(ctx) {
     async admit(args) {
       const verdict = registry.admit(args);
       if (!verdict.ok) return verdict;
-      if (await usage.isOverQuota(args)) {
-        return { ok: false, status: 429, reason: "quota exceeded" };
+      try {
+        if (await usage.isOverQuota(args)) {
+          verdict.release();
+          return { ok: false, status: 429, reason: "quota exceeded" };
+        }
+      } catch (error) {
+        verdict.release();
+        throw error;
       }
       return verdict;
     },
@@ -227,6 +233,8 @@ function init(ctx) {
         audience: config.jwt.audience,
         jwksUrl: config.jwt.jwksUrl,
         usernameClaim: config.jwt.usernameClaim,
+        verifiedClaim: config.jwt.verifiedClaim,
+        algorithms: config.jwt.algorithms,
       });
     }
     state.authenticate = tokens.createAuthenticator({

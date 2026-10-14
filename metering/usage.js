@@ -160,16 +160,29 @@ function createUsageMeter({
       if (db && pendingDb.size > 0) {
         const rows = [...pendingDb.values()];
         pendingDb.clear();
-        await db.transaction(async () => {
+        try {
+          await db.transaction(async () => {
+            for (const row of rows) {
+              await db.run(
+                "INSERT INTO usage_monthly (user_id, month, bytes_in, bytes_out, sessions) VALUES (?, ?, ?, ?, ?) " +
+                "ON CONFLICT(user_id, month) DO UPDATE SET bytes_in = bytes_in + excluded.bytes_in, " +
+                "bytes_out = bytes_out + excluded.bytes_out, sessions = sessions + excluded.sessions",
+                [row.userId, row.month, row.in, row.out, row.sessions],
+              );
+            }
+          });
+        } catch (error) {
+          // The transaction rolled back: put the rows back for the next flush.
           for (const row of rows) {
-            await db.run(
-              "INSERT INTO usage_monthly (user_id, month, bytes_in, bytes_out, sessions) VALUES (?, ?, ?, ?, ?) " +
-              "ON CONFLICT(user_id, month) DO UPDATE SET bytes_in = bytes_in + excluded.bytes_in, " +
-              "bytes_out = bytes_out + excluded.bytes_out, sessions = sessions + excluded.sessions",
-              [row.userId, row.month, row.in, row.out, row.sessions],
-            );
+            const key = `${row.userId}|${row.month}`;
+            const pending = pendingDb.get(key) || { userId: row.userId, month: row.month, in: 0, out: 0, sessions: 0 };
+            pending.in += row.in;
+            pending.out += row.out;
+            pending.sessions += row.sessions;
+            pendingDb.set(key, pending);
           }
-        });
+          throw error;
+        }
       }
       // Drop stale in-memory periods (older than two days).
       const today = dayKey(now());

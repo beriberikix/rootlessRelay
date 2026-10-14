@@ -84,16 +84,24 @@ function createUserStore(db, { bcryptRounds = 12, now = Date.now } = {}) {
       if (await findRowByUsername(candidate)) {
         candidate = `${candidate.slice(0, 100)}#${externalSub.slice(-8)}`;
       }
-      const result = await db.run(
-        "INSERT INTO users (username, password_hash, role, tier, status, external_sub, created_at) VALUES (?, NULL, 'user', ?, ?, ?, ?)",
+      // Concurrent first logins race to insert; the loser reads the winner's row.
+      await db.run(
+        "INSERT INTO users (username, password_hash, role, tier, status, external_sub, created_at) VALUES (?, NULL, 'user', ?, ?, ?, ?) " +
+          "ON CONFLICT(external_sub) DO NOTHING",
         [candidate, tier, status, externalSub, nowIso(now)],
       );
-      return this.findById(result.lastID);
+      return this.findByExternalSub(externalSub);
     },
 
     async setStatus(id, status) {
       if (!STATUSES.has(status)) throw new RangeError(`status must be one of ${[...STATUSES].join(", ")}`);
       const result = await db.run("UPDATE users SET status = ? WHERE id = ?", [status, id]);
+      return result.changes > 0;
+    },
+
+    // Only pending accounts; a ban that lands meanwhile is not undone.
+    async activatePending(id) {
+      const result = await db.run("UPDATE users SET status = 'active' WHERE id = ? AND status = 'pending'", [id]);
       return result.changes > 0;
     },
 

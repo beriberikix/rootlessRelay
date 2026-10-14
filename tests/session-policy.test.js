@@ -339,3 +339,21 @@ test("createPolicyFactory picks the identity tier and falls back to user", () =>
   assert.equal(factory.forSession({ kind: "user", owner: "user:1", tier: "gold" }).tier, TIERS.user);
   assert.equal(buildTcpReset({ srcIP: "1.1.1.1", srcPort: 1, dstIP: "2.2.2.2", dstPort: 2 }).length, 40);
 });
+
+test("a flood of denied destinations is summarised, not stored row by row", () => {
+  const rows = [];
+  const audit = { record: (row) => rows.push(row), finish() {} };
+  let clock = 0;
+  const policy = makePolicy({ tier: "user", owner: "user:1", egressMode: "hosted", audit, now: () => clock });
+  const session = attach(policy, fakeSession("flood"));
+  for (let i = 0; i < 50000; i += 1) {
+    policy.allowUdpSend(session, `10.${(i >> 16) & 255}.${(i >> 8) & 255}.${i & 255}`, 9, false, 8);
+  }
+  assert.equal(rows.length, 30, "per-minute budget for deny rows");
+  assert.ok(policy.deniedAt.size <= 1024, "denied-key memory is bounded");
+  clock = 61000;
+  policy.allowUdpSend(session, "10.200.0.1", 9, false, 8);
+  const summary = rows.find((row) => row.proto === "summary");
+  assert.equal(summary.verdict, "suppressed:deny=49970:allow=0");
+  assert.equal(rows.at(-1).verdict.startsWith("deny"), true, "a new window allows rows again");
+});

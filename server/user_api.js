@@ -90,6 +90,12 @@ function createUserApi({
     if (identity.status === "pending") throw new AuthError(403, "account-pending");
   }
 
+  // Managing credentials needs a sign-in. An API token alone must not mint or
+  // revoke tokens, or a leaked token could outlive its own revocation.
+  function requireSignIn(identity) {
+    if (identity.via !== "jwt") throw new AuthError(403, "sign-in-required");
+  }
+
   // Failed redemptions per user in the last hour, to slow down guessing.
   const redeemFailures = new Map(); // userId -> [timestamps]
   function recentFailures(userId) {
@@ -150,7 +156,7 @@ function createUserApi({
       async handle({ identity, req }) {
         // Deleting an account needs a sign-in, not just an API token, and the
         // username typed back as confirmation.
-        if (identity.via !== "jwt") return [403, { error: "sign-in-required" }];
+        requireSignIn(identity);
         if (identity.kind === "operator") return [403, { error: "operators are deleted from the admin panel" }];
         const body = await readJsonBody(req);
         if (!body || body.confirm !== identity.username) {
@@ -178,7 +184,7 @@ function createUserApi({
           log?.warn("invite redemption failed", { userId: identity.userId });
           return [400, { error: "invalid, used or expired invite code" }];
         }
-        await store(users).setStatus(identity.userId, "active");
+        await store(users).activatePending(identity.userId);
         redeemFailures.delete(identity.userId);
         log?.info("invite redeemed", { userId: identity.userId });
         return [200, { status: "active" }];
@@ -203,7 +209,12 @@ function createUserApi({
       method: "DELETE",
       match: (path) => path.startsWith(`${PREFIX}/sessions/`),
       async handle({ identity, path }) {
-        const sessionId = decodeURIComponent(path.slice(`${PREFIX}/sessions/`.length));
+        let sessionId;
+        try {
+          sessionId = decodeURIComponent(path.slice(`${PREFIX}/sessions/`.length));
+        } catch (_error) {
+          return [404, { error: "session not found" }];
+        }
         const session = activeSessions ? activeSessions.get(sessionId) : null;
         if (!session || !session.identity || session.identity.owner !== identity.owner) {
           return [404, { error: "session not found" }];
@@ -225,6 +236,7 @@ function createUserApi({
       match: (path) => path === `${PREFIX}/tokens`,
       async handle({ identity, req }) {
         requireActive(identity);
+        requireSignIn(identity);
         const body = await readJsonBody(req);
         const name = typeof body.name === "string" && body.name.trim() ? body.name.trim().slice(0, 64) : "default";
         let expiresAt = null;
@@ -250,11 +262,13 @@ function createUserApi({
       method: "DELETE",
       match: (path) => path.startsWith(`${PREFIX}/tokens/`),
       async handle({ identity, path }) {
+        requireSignIn(identity);
         const id = parseId(path.slice(`${PREFIX}/tokens/`.length));
         const tokenStore = store(apiTokens);
         const mine = id ? (await tokenStore.listForUser(identity.userId)).some((t) => t.id === id) : false;
         if (!mine || !(await tokenStore.revoke(id))) return [404, { error: "token not found" }];
-        log?.info("api token revoked by owner", { userId: identity.userId, tokenId: id });
+        const killed = registry && registry.killToken ? registry.killToken(id, 1008, "token revoked") : 0;
+        log?.info("api token revoked by owner", { userId: identity.userId, tokenId: id, killedSessions: killed });
         return [204, null];
       },
     },

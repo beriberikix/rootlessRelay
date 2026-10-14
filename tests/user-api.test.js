@@ -53,7 +53,14 @@ function fakeSession({ owner, clientIP = "10.1.1.1", bytesSent = 0 }) {
   };
 }
 
-async function startServer({ env = {}, usage = null, wrapAuthenticate = (fn) => fn } = {}) {
+// Bearers prefixed "jwt:" stand in for a signed-in (external JWT) session of
+// the account that owns the API token after the prefix.
+const signedIn = (fn) => async (token, ctx) => {
+  if (token.startsWith("jwt:")) return { ...(await fn(token.slice(4), ctx)), via: "jwt" };
+  return fn(token, ctx);
+};
+
+async function startServer({ env = {}, usage = null, wrapAuthenticate = signedIn } = {}) {
   const config = resolveConfig({
     RELAY_MODE: "hosted",
     ADMIN_SESSION_SECRET: "s",
@@ -75,6 +82,16 @@ async function startServer({ env = {}, usage = null, wrapAuthenticate = (fn) => 
       if (!session) return false;
       session.ws.close(code, reason);
       return true;
+    },
+    killToken(tokenId, code, reason) {
+      let killed = 0;
+      activeSessions.forEach((session) => {
+        if (session.identity.tokenId === tokenId) {
+          session.ws.close(code, reason);
+          killed += 1;
+        }
+      });
+      return killed;
     },
     killOwner(owner, code, reason) {
       let killed = 0;
@@ -167,6 +184,7 @@ test("sessions are scoped to the owner and only the owner can kill them", async 
     assert.equal(list.json()[0].startedAt, new Date(1000).toISOString());
 
     assert.equal((await request(port, { method: "DELETE", path: "/api/me/sessions/s-bob", headers: auth(aliceToken) })).status, 404);
+    assert.equal((await request(port, { method: "DELETE", path: "/api/me/sessions/%E0", headers: auth(aliceToken) })).status, 404, "malformed id");
     assert.equal(theirs.closed.length, 0);
     assert.equal((await request(port, { method: "DELETE", path: "/api/me/sessions/s-alice", headers: auth(aliceToken) })).status, 204);
     assert.deepEqual(mine.closed, [{ code: 1008, reason: "terminated by account owner" }]);
@@ -177,13 +195,19 @@ test("sessions are scoped to the owner and only the owner can kill them", async 
 });
 
 test("token self-service: create with expiry, list, revoke only your own, cap on active tokens", async () => {
-  const { server, port, users, apiTokens } = await startServer();
+  const { server, port, users, apiTokens, activeSessions } = await startServer();
   try {
     const alice = await users.create({ username: "alice", role: "user" });
     const bob = await users.create({ username: "bob", role: "user" });
     const aliceToken = (await apiTokens.create({ userId: alice.id, name: "seed" })).token;
     const bobOwned = await apiTokens.create({ userId: bob.id, name: "bobs" });
-    const auth = { Authorization: `Bearer ${aliceToken}`, "Content-Type": "application/json" };
+    const auth = { Authorization: `Bearer jwt:${aliceToken}`, "Content-Type": "application/json" };
+    const tokenOnly = { Authorization: `Bearer ${aliceToken}`, "Content-Type": "application/json" };
+    const minted = await request(port, { method: "POST", path: "/api/me/tokens", headers: tokenOnly, body: "{}" });
+    assert.equal(minted.status, 403, "an API token cannot mint tokens");
+    assert.equal(minted.json().error, "sign-in-required");
+    assert.equal((await request(port, { method: "DELETE", path: `/api/me/tokens/${bobOwned.id}`, headers: tokenOnly })).status, 403);
+    assert.equal((await request(port, { path: "/api/me/tokens", headers: tokenOnly })).status, 200, "listing is fine");
 
     const created = await request(port, {
       method: "POST", path: "/api/me/tokens", headers: auth, body: JSON.stringify({ name: "laptop", expiresInDays: 30 }),
@@ -204,7 +228,11 @@ test("token self-service: create with expiry, list, revoke only your own, cap on
     assert.ok(list.json().every((t) => t.token === undefined), "secrets are never listed");
 
     assert.equal((await request(port, { method: "DELETE", path: `/api/me/tokens/${bobOwned.id}`, headers: auth })).status, 404);
+    const viaLaptop = { ...fakeSession({ owner: `user:${alice.id}` }) };
+    viaLaptop.identity = { owner: `user:${alice.id}`, tokenId: token.id };
+    activeSessions.set("s-laptop", viaLaptop);
     assert.equal((await request(port, { method: "DELETE", path: `/api/me/tokens/${token.id}`, headers: auth })).status, 204);
+    assert.deepEqual(viaLaptop.closed, [{ code: 1008, reason: "token revoked" }], "revoking closes its sessions");
     assert.equal((await request(port, { method: "DELETE", path: `/api/me/tokens/${token.id}`, headers: auth })).status, 404);
     const after = await request(port, { path: "/api/me/tokens", headers: auth });
     assert.ok(after.json().find((t) => t.id === token.id).revokedAt);
@@ -303,7 +331,8 @@ test("pending accounts can read, redeem an invite and nothing else", async () =>
     assert.equal(good.status, 200);
     assert.equal((await users.findById(erin.id)).status, "active");
     assert.equal((await request(port, { method: "POST", path: "/api/me/redeem", headers, body: JSON.stringify({ code: invite.code }) })).status, 409);
-    assert.equal((await request(port, { method: "POST", path: "/api/me/tokens", headers, body: "{}" })).status, 201);
+    assert.equal((await request(port, { method: "POST", path: "/api/me/tokens", headers, body: "{}" })).status, 403, "API token alone");
+    assert.equal((await request(port, { method: "POST", path: "/api/me/tokens", headers: { ...headers, Authorization: `Bearer jwt:${token}` }, body: "{}" })).status, 201);
 
     // Guessing is throttled per account.
     const frank = await users.create({ username: "frank", status: "pending" });
@@ -321,12 +350,7 @@ test("pending accounts can read, redeem an invite and nothing else", async () =>
 });
 
 test("account deletion needs a sign-in and the username typed back", async () => {
-  // Treat bearers prefixed "jwt:" as signed-in sessions for the same account.
-  const wrap = (fn) => async (token, ctx) => {
-    if (token.startsWith("jwt:")) return { ...(await fn(token.slice(4), ctx)), via: "jwt" };
-    return fn(token, ctx);
-  };
-  const { server, port, users, apiTokens, activeSessions } = await startServer({ wrapAuthenticate: wrap });
+  const { server, port, users, apiTokens, activeSessions } = await startServer();
   try {
     const gina = await users.create({ username: "gina" });
     const token = (await apiTokens.create({ userId: gina.id })).token;

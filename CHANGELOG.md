@@ -61,6 +61,36 @@
 - The SQLite database runs with `synchronous=NORMAL` and a 5 s
   `busy_timeout`, as WAL-shipping backups such as Litestream expect.
 
+### Security (fork)
+
+Fixes from a review of the hosted code paths:
+
+- API tokens can no longer create or revoke tokens (`403 sign-in-required`);
+  only a signed-in (external JWT) session can, so a leaked token cannot
+  outlive its own revocation. Revoking a token closes the sessions opened
+  with it.
+- All SQLite access goes through one queue and transactions hold it
+  exclusively: statements from other callers could join an open audit or
+  usage transaction (a ban could be rolled back) and a second BEGIN failed,
+  dropping usage and audit rows. Failed flushes now requeue their rows.
+- Audit volume and memory per session are bounded: denied attempts beyond 30
+  rows a minute and allowed connections beyond 600 are summarised in one
+  row; the denied-destination map is capped.
+- `TRUSTED_PROXY_CIDRS` and `PEER_IP_HEADER`: the client-address header is
+  believed only from the configured proxy ranges, so clients reaching the
+  platform hostname directly cannot forge their address; values must be IPs.
+- Admission reserves its slot before the quota lookup and handshake, so
+  parallel upgrades cannot exceed per-account, per-address or pool caps.
+- Public listener: 10 s header timeout, 15 s request timeout.
+- External JWTs: `JWT_ALGORITHMS` (default RS256) and `JWT_VERIFIED_CLAIM`
+  (an unverified email is not used as the username).
+- Invite redemption is one statement that also refuses a second code for the
+  same account; concurrent first logins no longer fail on the unique key.
+- Admin API: no form-encoded bodies, and state-changing requests carrying an
+  Origin must come from the panel's own host (CSRF via `fly proxy` on
+  localhost).
+- A malformed session id in `DELETE /api/me/sessions/:id` returns 404, not 500.
+
 ### Fixed (fork)
 
 - `benchmarks/ws-relay-throughput.js` logs into the admin API before polling

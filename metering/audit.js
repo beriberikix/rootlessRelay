@@ -99,7 +99,9 @@ function createAuditLog({
       const updates = [...pendingUpdates.entries()];
       pendingUpdates.clear();
       if (inserts.length === 0 && updates.length === 0) return;
-      await db.transaction(async () => {
+      const inserted = new Map(); // row -> id, applied only after commit
+      try {
+        await db.transaction(async () => {
         for (const row of inserts) {
           const result = await db.run(
             "INSERT INTO connections_audit (owner, session_id, proto, dst_ip, dst_port, verdict, bytes_in, bytes_out, started_at, ended_at) " +
@@ -107,11 +109,7 @@ function createAuditLog({
             [row.owner, row.session_id, row.proto, row.dst_ip, row.dst_port, row.verdict,
               row.bytes_in, row.bytes_out, row.started_at, row.ended_at],
           );
-          if (row.key && pendingByKey.get(row.key) === row) {
-            // Still open: remember the id so finish() can update it later.
-            insertedIds.set(row.key, result.lastID);
-            pendingByKey.delete(row.key);
-          }
+          if (row.key) inserted.set(row, { id: result.lastID, endedAt: row.ended_at });
         }
         for (const [id, update] of updates) {
           await db.run(
@@ -119,7 +117,23 @@ function createAuditLog({
             [update.ended_at, update.bytes_in, update.bytes_out, id],
           );
         }
-      });
+        });
+      } catch (error) {
+        // Rolled back: requeue so the rows are retried, not lost.
+        pendingInserts.unshift(...inserts);
+        for (const [id, update] of updates) if (!pendingUpdates.has(id)) pendingUpdates.set(id, update);
+        throw error;
+      }
+      for (const [row, { id, endedAt }] of inserted) {
+        if (pendingByKey.get(row.key) === row) {
+          // Still open: remember the id so finish() can update it later.
+          insertedIds.set(row.key, id);
+          pendingByKey.delete(row.key);
+        } else if (row.ended_at !== endedAt) {
+          // finish() merged into the row while its insert was in flight.
+          pendingUpdates.set(id, { ended_at: row.ended_at, bytes_in: row.bytes_in, bytes_out: row.bytes_out });
+        }
+      }
       if (dropped > 0) {
         log?.warn("audit rows dropped under backpressure", { dropped });
         dropped = 0;

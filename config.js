@@ -1,5 +1,7 @@
 "use strict";
 
+const { parseProxyRanges } = require("./server/client_ip");
+
 // Hosted-mode configuration. RELAY_MODE picks a set of defaults; every
 // individual setting can still be overridden by its own environment variable.
 // The upstream data-plane settings in relay.js are untouched by this module.
@@ -140,6 +142,8 @@ function resolveConfig(env = process.env) {
         audience: jwtAudience,
         jwksUrl: jwtJwksUrl,
         usernameClaim: env.JWT_USERNAME_CLAIM || "email",
+        verifiedClaim: env.JWT_VERIFIED_CLAIM || null,
+        algorithms: parseList(env.JWT_ALGORITHMS || "RS256"),
         defaultTier: env.JWT_DEFAULT_TIER || "user",
       }
       : null,
@@ -164,6 +168,10 @@ function resolveConfig(env = process.env) {
       min: 1,
     }),
     clientIpHeader: (env.CLIENT_IP_HEADER || "x-forwarded-for").toLowerCase(),
+    // Header from the platform edge naming the immediate peer (e.g.
+    // fly-client-ip), and the ranges whose CLIENT_IP_HEADER is believed.
+    peerIpHeader: env.PEER_IP_HEADER ? env.PEER_IP_HEADER.toLowerCase() : null,
+    trustedProxyCidrs: parseList(env.TRUSTED_PROXY_CIDRS || ""),
 
     inboundRulesEnabled: parseBool(
       env.INBOUND_RULES_ENABLED,
@@ -258,6 +266,26 @@ function resolveConfig(env = process.env) {
       "ADMIN_SESSION_SECRET is using the default value. Set a strong secret for production.",
     );
   }
+
+  let trustedProxies = null;
+  try {
+    trustedProxies = parseProxyRanges(config.trustedProxyCidrs);
+  } catch (error) {
+    throw new ConfigError(`TRUSTED_PROXY_CIDRS: ${error.message}`);
+  }
+  if (config.hosted && config.trustProxy && !trustedProxies) {
+    warnings.push(
+      "TRUST_PROXY is on without TRUSTED_PROXY_CIDRS; clients that reach the relay directly can forge their address",
+    );
+  }
+  // Options for server/client_ip.js resolveClientIP, shared by every caller.
+  config.clientIpOptions = {
+    trustProxy: config.trustProxy,
+    hops: config.trustProxyHops,
+    header: config.clientIpHeader,
+    peerHeader: config.peerIpHeader,
+    trustedProxies,
+  };
 
   return config;
 }

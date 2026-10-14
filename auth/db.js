@@ -4,6 +4,7 @@
 // file holds operators, end users, API tokens, usage, the connection audit
 // log and admin login sessions.
 
+const { AsyncLocalStorage } = require("node:async_hooks");
 const sqlite3 = require("sqlite3");
 
 const MIGRATIONS = [
@@ -126,13 +127,27 @@ const MIGRATIONS = [
   },
 ];
 
+// All access shares one sqlite3 connection, where a transaction is
+// connection-wide: a statement issued by an unrelated caller while another
+// caller's BEGIN is open would join (and roll back with) that transaction,
+// and a second BEGIN fails. So every statement goes through one FIFO queue,
+// and a transaction holds the queue until it commits. Statements issued from
+// inside the transaction callback (tracked with AsyncLocalStorage) bypass the
+// queue, so callbacks may keep using `db` directly.
 function openDatabase(filename = ":memory:") {
   const raw = new sqlite3.Database(filename);
+  const inTransaction = new AsyncLocalStorage();
+  let tail = Promise.resolve();
 
-  const db = {
-    raw,
-    filename,
-    run(sql, params = []) {
+  function exclusive(task) {
+    if (inTransaction.getStore()) return task();
+    const result = tail.then(task, task);
+    tail = result.catch(() => {});
+    return result;
+  }
+
+  const rawOps = {
+    run(sql, params) {
       return new Promise((resolve, reject) => {
         raw.run(sql, params, function onRun(err) {
           if (err) reject(err);
@@ -140,12 +155,12 @@ function openDatabase(filename = ":memory:") {
         });
       });
     },
-    get(sql, params = []) {
+    get(sql, params) {
       return new Promise((resolve, reject) => {
         raw.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)));
       });
     },
-    all(sql, params = []) {
+    all(sql, params) {
       return new Promise((resolve, reject) => {
         raw.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)));
       });
@@ -155,16 +170,35 @@ function openDatabase(filename = ":memory:") {
         raw.exec(sql, (err) => (err ? reject(err) : resolve()));
       });
     },
-    async transaction(fn) {
-      await db.run("BEGIN IMMEDIATE");
-      try {
-        const result = await fn(db);
-        await db.run("COMMIT");
-        return result;
-      } catch (error) {
-        await db.run("ROLLBACK").catch(() => {});
-        throw error;
-      }
+  };
+
+  const db = {
+    raw,
+    filename,
+    run(sql, params = []) {
+      return exclusive(() => rawOps.run(sql, params));
+    },
+    get(sql, params = []) {
+      return exclusive(() => rawOps.get(sql, params));
+    },
+    all(sql, params = []) {
+      return exclusive(() => rawOps.all(sql, params));
+    },
+    exec(sql) {
+      return exclusive(() => rawOps.exec(sql));
+    },
+    transaction(fn) {
+      return exclusive(() => inTransaction.run(true, async () => {
+        await rawOps.run("BEGIN IMMEDIATE", []);
+        try {
+          const result = await fn(db);
+          await rawOps.run("COMMIT", []);
+          return result;
+        } catch (error) {
+          await rawOps.run("ROLLBACK", []).catch(() => {});
+          throw error;
+        }
+      }));
     },
     async version() {
       await db.exec("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)");
@@ -207,8 +241,9 @@ function openDatabase(filename = ":memory:") {
       }
       return current;
     },
+    // Waits for queued statements, so a final flush is not cut off.
     close() {
-      return new Promise((resolve) => raw.close(() => resolve()));
+      return exclusive(() => new Promise((resolve) => raw.close(() => resolve())));
     },
   };
   return db;

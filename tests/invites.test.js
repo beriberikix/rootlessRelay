@@ -44,14 +44,20 @@ test("invite store: create, list, single-use redeem, revoke, expiry", async () =
   assert.equal(listed[0].code, undefined, "codes are never listed");
   assert.equal(await invites.revoke(first.id), false, "redeemed codes cannot be revoked");
 
+  // A user who already redeemed cannot consume a second code.
+  const spare = await invites.create({});
+  assert.equal(await invites.redeem(spare.code, alice.id), false);
+  assert.equal(await invites.redeem(spare.code, bob.id), true);
+
   const second = await invites.create({ createdBy: op.id });
   assert.equal(await invites.revoke(second.id), true);
-  assert.equal(await invites.redeem(second.code, bob.id), false);
+  const carol = await users.create({ username: "carol", status: "pending" });
+  assert.equal(await invites.redeem(second.code, carol.id), false);
 
   const third = await invites.create({ expiresAt: new Date(clock + 1000).toISOString() });
   clock += 2000;
   assert.equal((await invites.list()).find((i) => i.id === third.id).state, "expired");
-  assert.equal(await invites.redeem(third.code, bob.id), false);
+  assert.equal(await invites.redeem(third.code, carol.id), false);
 
   // Deleting the redeeming user keeps the invite row.
   await users.remove(alice.id);
