@@ -148,7 +148,7 @@ test("authenticator dispatches API tokens, anon tokens and external JWTs", async
   const alice = await users.create({ username: "alice", password: "password-1" });
   const created = await apiTokens.create({ userId: alice.id });
   const viaToken = await authenticate(created.token, { clientIP: "1.1.1.1" });
-  assert.deepEqual(viaToken, { kind: "user", owner: `user:${alice.id}`, userId: alice.id, username: "alice", tier: "user" });
+  assert.deepEqual(viaToken, { kind: "user", owner: `user:${alice.id}`, userId: alice.id, username: "alice", tier: "user", status: "active", via: "api-token" });
   await users.setStatus(alice.id, "banned");
   await assert.rejects(authenticate(created.token, {}), (error) => error.status === 403);
 
@@ -187,6 +187,27 @@ test("authenticator dispatches API tokens, anon tokens and external JWTs", async
 
   const optional = createAuthenticator({ config: { ...config, authRequired: false }, users, apiTokens, anon, jwt });
   assert.equal((await optional(null, {})).kind, "local");
+
+  // Invite-only sign-up: a first-time external login creates a pending
+  // account that may use the account API but not open sessions.
+  const invite = createAuthenticator({ config: { ...config, signupMode: "invite" }, users, apiTokens, anon, jwt });
+  const carolJwt = await new jose.SignJWT({ email: "carol@example.com" })
+    .setProtectedHeader({ alg: "RS256" })
+    .setIssuer("https://idp.example")
+    .setAudience("relay")
+    .setSubject("sub-carol")
+    .setExpirationTime(Math.floor(clock.now / 1000) + 300)
+    .sign(privateKey);
+  await assert.rejects(invite(carolJwt, {}), (error) => error.status === 403 && error.code === "account-pending");
+  const pending = await invite(carolJwt, { allowPending: true });
+  assert.equal(pending.status, "pending");
+  assert.equal(pending.via, "jwt");
+  const carolToken = await apiTokens.create({ userId: pending.userId });
+  await assert.rejects(invite(carolToken.token, {}), /account-pending/);
+  assert.equal((await invite(carolToken.token, { allowPending: true })).status, "pending");
+  assert.equal((await invite(external, {})).status, "active", "existing accounts are unaffected");
+  await users.setStatus(pending.userId, "banned");
+  await assert.rejects(invite(carolJwt, { allowPending: true }), /account-suspended/);
   await db.close();
 });
 

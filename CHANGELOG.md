@@ -38,6 +38,12 @@
 - Account API under `/api/me` on the public listener: a signed-in user can
   read their account, tier limits and usage, list and close their own
   sessions, and create, list and revoke their own API tokens.
+- Invite-only sign-up (`SIGNUP_MODE=invite`): new external accounts start
+  `pending` (migration 2 adds the status and an `invites` table) and redeem a
+  single-use code via `POST /api/me/redeem`; operators create, list and revoke
+  codes and activate accounts from the panel's Invites section.
+- `DELETE /api/me` lets a signed-in user delete their own account after
+  typing their username back.
 - `DELETE /api/users/:id` on the admin API, with a Delete button in the panel,
   removes an account, its tokens and usage rows and closes its sessions.
 

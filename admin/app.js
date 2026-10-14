@@ -142,6 +142,7 @@ function createAdminApp({
   config,
   users,
   apiTokens,
+  invites = null,
   sessionStore,
   activeSessions,
   registry,
@@ -276,6 +277,7 @@ function createAdminApp({
       proxyPort,
       authRequired: config.authRequired,
       anonEnabled: config.anonEnabled,
+      signupMode: config.signupMode,
       externalJwt: Boolean(config.jwt),
       tiers: tiers ? Object.keys(tiers) : [],
     });
@@ -429,6 +431,43 @@ function createAdminApp({
 
   app.post("/api/users/:id/ban", asyncRoute((req, res) => setUserStatus(req, res, "banned")));
   app.post("/api/users/:id/unban", asyncRoute((req, res) => setUserStatus(req, res, "active")));
+  app.post("/api/users/:id/activate", asyncRoute((req, res) => setUserStatus(req, res, "active")));
+
+  // --- invite codes (SIGNUP_MODE=invite) ---------------------------------------
+
+  app.get("/api/invites", asyncRoute(async (_req, res) => {
+    res.status(200).json(invites ? await invites.list() : []);
+  }));
+
+  app.post("/api/invites", asyncRoute(async (req, res) => {
+    if (!invites) {
+      res.sendStatus(404);
+      return;
+    }
+    const { note, expiresInDays } = req.body || {};
+    let expiresAt = null;
+    if (expiresInDays !== undefined && expiresInDays !== null && expiresInDays !== "") {
+      const days = Number(expiresInDays);
+      if (!Number.isFinite(days) || days <= 0 || days > 365) {
+        res.status(400).json({ error: "expiresInDays must be between 1 and 365" });
+        return;
+      }
+      expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+    }
+    const created = await invites.create({ createdBy: req.user.id, note, expiresAt });
+    log?.info("invite created", { inviteId: created.id, by: req.user.username });
+    res.status(201).json(created);
+  }));
+
+  app.delete("/api/invites/:id", asyncRoute(async (req, res) => {
+    const id = parseId(req.params.id);
+    if (!invites || !id || !(await invites.revoke(id))) {
+      res.sendStatus(404);
+      return;
+    }
+    log?.info("invite revoked", { inviteId: id, by: req.user.username });
+    res.sendStatus(204);
+  }));
 
   app.post("/api/users/:id/tier", asyncRoute(async (req, res) => {
     const id = parseId(req.params.id);

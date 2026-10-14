@@ -113,3 +113,9 @@ test("METRICS_PUBLIC opts the scrape endpoint out of auth", () => {
   const config = resolveConfig({ ...HOSTED_MIN, METRICS_PUBLIC: "true" });
   assert.equal(config.metricsPublic, true);
 });
+
+test("SIGNUP_MODE defaults to open and accepts only open or invite", () => {
+  assert.equal(resolveConfig({}).signupMode, "open");
+  assert.equal(resolveConfig({ SIGNUP_MODE: "invite" }).signupMode, "invite");
+  assert.throws(() => resolveConfig({ SIGNUP_MODE: "closed" }), ConfigError);
+});

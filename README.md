@@ -290,6 +290,15 @@ Browser origins must be in `ALLOWED_ORIGINS`; CORS headers are emitted.
 | `GET /api/me/tokens` | The caller's API tokens (never the secrets). |
 | `POST /api/me/tokens` | Create a token: `{ "name", "expiresInDays"? }`. The secret is returned once. At most 20 active tokens. |
 | `DELETE /api/me/tokens/:id` | Revoke one of the caller's tokens. |
+| `POST /api/me/redeem` | Redeem an invite code: `{ "code" }`. Activates a pending account; 10 failed attempts per hour per account. |
+| `DELETE /api/me` | Delete the caller's account, tokens and usage: `{ "confirm": "<username>" }`. Needs a sign-in (external JWT), not an API token; operators are deleted from the admin panel. |
+
+With `SIGNUP_MODE=invite`, an account first seen through the external
+identity provider starts `pending`. It can call `GET /api/me`, redeem an
+invite and delete itself; opening a session or creating a token returns
+`403 account-pending`. Operators create single-use codes (`RLY-XXXX-XXXX-XXXX`,
+only a hash is stored) under **Invites** in the admin panel, or activate a
+pending account directly.
 
 ### Hosted-mode settings
 
@@ -301,6 +310,7 @@ Browser origins must be in `ALLOWED_ORIGINS`; CORS headers are emitted.
 | `ANON_TOKEN_TTL_S`, `ANON_TOKEN_BIND_IP`, `ANON_TOKENS_PER_IP_PER_HOUR` | Anonymous token lifetime, address binding, issuance limit. | `900`, `true`, `10` | same |
 | `TURNSTILE_SECRET` | Require a Cloudflare Turnstile check to issue anonymous tokens. | unset | unset |
 | `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_JWKS_URL`, `JWT_USERNAME_CLAIM`, `JWT_DEFAULT_TIER` | External OIDC verification. | unset | unset |
+| `SIGNUP_MODE` | `open`, or `invite` to create new external accounts as pending until they redeem an invite code. | `open` | `open` |
 | `ALLOWED_ORIGINS` | Comma-separated browser origins allowed to open sessions and request anonymous tokens. | unset | unset (warns) |
 | `ALLOW_QUERY_TOKEN` | Accept `?token=` on the upgrade URL (leaks into logs). | `false` | `false` |
 | `EGRESS_POLICY`, `EGRESS_DENY_CIDRS`, `EGRESS_ALLOW_CIDRS`, `EGRESS_DENY_PORTS` | Outbound destination policy. Allow-listed CIDRs are exceptions to the deny list. | `open` | `hosted`, deny port 25 |

@@ -82,6 +82,9 @@
     .badge.operator { background-color: var(--ctp-mauve); color: var(--ctp-crust); }
     .badge.banned { background-color: var(--ctp-red); color: var(--ctp-crust); }
     .badge.active { background-color: var(--ctp-green); color: var(--ctp-crust); }
+    .badge.pending, .badge.open { background-color: var(--ctp-yellow); color: var(--ctp-crust); }
+    .badge.redeemed { background-color: var(--ctp-green); color: var(--ctp-crust); }
+    .badge.revoked, .badge.expired { background-color: var(--ctp-surface2); color: var(--ctp-text); }
     .badge.deny { background-color: var(--ctp-red); color: var(--ctp-crust); }
     .badge.allow { background-color: var(--ctp-surface2); color: var(--ctp-text); }
 
@@ -226,6 +229,7 @@
     <div class="section-tabs" id="section-tabs">
       <button type="button" class="section-tab active" data-section="sessions">Sessions</button>
       <button type="button" class="section-tab" data-section="users">Users &amp; Tokens</button>
+      <button type="button" class="section-tab" data-section="invites">Invites</button>
       <button type="button" class="section-tab" data-section="audit">Audit Log</button>
       <button type="button" class="section-tab" data-section="rules" id="rules-tab">Inbound Rules</button>
     </div>
@@ -306,6 +310,48 @@
         <tbody></tbody>
       </table>
       <div id="users-empty" class="empty hidden">No users yet.</div>
+    </section>
+
+    <!-- Invites -->
+    <section id="section-invites" class="panel hidden">
+      <h2>Invite Codes</h2>
+      <p class="muted" id="invites-mode"></p>
+      <form id="create-invite-form" class="toolbar">
+        <div class="form-group">
+          <label for="invite-note">Note <span class="muted">(who it is for)</span></label>
+          <input id="invite-note" class="catppuccin-input" type="text" maxlength="200" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label for="invite-days">Expires in days <span class="muted">(blank: never)</span></label>
+          <input id="invite-days" class="catppuccin-input" type="number" min="1" max="365" value="14">
+        </div>
+        <div class="form-group">
+          <label>&nbsp;</label>
+          <button type="submit" class="success">Create invite</button>
+        </div>
+      </form>
+      <div id="invite-reveal" class="token-reveal hidden">
+        <strong>New invite code (shown once):</strong>
+        <code id="invite-reveal-value"></code>
+        <button type="button" class="small" id="invite-reveal-copy">Copy</button>
+        <button type="button" class="small secondary" id="invite-reveal-dismiss">Dismiss</button>
+      </div>
+      <table id="invites">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Code</th>
+            <th>Note</th>
+            <th>State</th>
+            <th>Created</th>
+            <th>Expires</th>
+            <th>Redeemed by</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id="invites-empty" class="empty hidden">No invite codes yet.</div>
     </section>
 
     <!-- Audit -->
@@ -611,10 +657,10 @@
     function showSection(name) {
       activeSection = name;
       $$('.section-tab').forEach((tab) => tab.classList.toggle('active', tab.dataset.section === name));
-      for (const section of ['sessions', 'users', 'audit', 'rules']) {
+      for (const section of ['sessions', 'users', 'invites', 'audit', 'rules']) {
         $(`#section-${section}`).classList.toggle('hidden', section !== name);
       }
-      const loaders = { sessions: fetchSessions, users: loadUsers, audit: loadAudit, rules: loadRules };
+      const loaders = { sessions: fetchSessions, users: loadUsers, invites: loadInvites, audit: loadAudit, rules: loadRules };
       loaders[name]().catch((error) => showToaster(error.message, true));
     }
 
@@ -768,6 +814,9 @@
       ];
       if (user.status === 'banned') {
         buttons.push(el('button', { type: 'button', class: 'small', text: 'Unban', 'data-action': 'unban', 'data-user': user.id }));
+      } else if (user.status === 'pending') {
+        buttons.push(el('button', { type: 'button', class: 'small success', text: 'Activate', 'data-action': 'activate', 'data-user': user.id }));
+        buttons.push(el('button', { type: 'button', class: 'small danger', text: 'Ban', 'data-action': 'ban', 'data-user': user.id }));
       } else {
         buttons.push(el('button', { type: 'button', class: 'small danger', text: 'Ban', 'data-action': 'ban', 'data-user': user.id }));
       }
@@ -911,6 +960,10 @@
             await postJson(`/api/users/${userId}/unban`, {});
             showToaster('User unbanned');
             break;
+          case 'activate':
+            await postJson(`/api/users/${userId}/activate`, {});
+            showToaster('User activated');
+            break;
           case 'delete': {
             const typed = window.prompt(`Delete ${button.dataset.username}, their tokens and usage? Type the username to confirm.`);
             if (typed !== button.dataset.username) return;
@@ -937,6 +990,64 @@
             return;
         }
         await loadUsers();
+      } catch (error) {
+        showToaster(error.message, true);
+      }
+    });
+
+    // ---------- invites -------------------------------------------------------
+
+    async function loadInvites() {
+      $('#invites-mode').textContent = config.signupMode === 'invite'
+        ? 'Sign-up is invite-only: new accounts stay pending until they redeem a code on the dashboard.'
+        : 'Sign-up is open (SIGNUP_MODE=open); codes are only needed if you switch to invite mode.';
+      const invites = await apiJson('/api/invites');
+      const tbody = $('#invites tbody');
+      tbody.innerHTML = '';
+      for (const invite of invites) {
+        tbody.appendChild(el('tr', {}, [
+          el('td', { class: 'num', text: String(invite.id) }),
+          el('td', { class: 'mono', text: `RLY-…-${invite.hint}` }),
+          el('td', { text: invite.note || '' }),
+          el('td', {}, [badge(invite.state, invite.state)]),
+          el('td', { text: formatTime(invite.createdAt) }),
+          el('td', { text: invite.expiresAt ? formatTime(invite.expiresAt) : 'never' }),
+          el('td', { text: invite.redeemedBy ? `${invite.redeemedBy} (${formatTime(invite.redeemedAt)})` : '' }),
+          el('td', {}, invite.state === 'open'
+            ? [el('button', { type: 'button', class: 'small danger', text: 'Revoke', 'data-action': 'revoke-invite', 'data-invite': invite.id })]
+            : []),
+        ]));
+      }
+      emptyState('#invites', '#invites-empty', invites.length === 0);
+    }
+
+    $('#create-invite-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      try {
+        const created = await postJson('/api/invites', {
+          note: $('#invite-note').value.trim() || undefined,
+          expiresInDays: $('#invite-days').value || null,
+        });
+        $('#invite-reveal-value').textContent = created.code;
+        $('#invite-reveal').classList.remove('hidden');
+        $('#invite-note').value = '';
+        await loadInvites();
+      } catch (error) {
+        showToaster(error.message, true);
+      }
+    });
+    $('#invite-reveal-copy').addEventListener('click', () => copyToClipboard($('#invite-reveal-value').textContent));
+    $('#invite-reveal-dismiss').addEventListener('click', () => {
+      $('#invite-reveal-value').textContent = '';
+      $('#invite-reveal').classList.add('hidden');
+    });
+    $('#invites').addEventListener('click', async (event) => {
+      const button = event.target.closest('button[data-action="revoke-invite"]');
+      if (!button) return;
+      try {
+        await apiFetch(`/api/invites/${button.dataset.invite}`, { method: 'DELETE' });
+        showToaster('Invite revoked');
+        await loadInvites();
       } catch (error) {
         showToaster(error.message, true);
       }

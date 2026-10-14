@@ -9,13 +9,16 @@ const { MAX_ACTIVE_TOKENS, createUserApi, publicTier } = require("../server/user
 const { openDatabase } = require("../auth/db");
 const { createUserStore } = require("../auth/users");
 const { createApiTokenStore, createAuthenticator } = require("../auth/tokens");
+const { createInviteStore } = require("../auth/invites");
 const { resolveTiers } = require("../policy/tiers");
 
 const quietLog = { debug() {}, info() {}, warn() {}, error() {} };
 
 function request(port, { method = "GET", path = "/", headers = {}, body = null } = {}) {
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: "127.0.0.1", port, method, path, headers }, (res) => {
+    // Node sends DELETE bodies without framing unless Content-Length is set.
+    const framed = body ? { "Content-Length": Buffer.byteLength(body), ...headers } : headers;
+    const req = http.request({ host: "127.0.0.1", port, method, path, headers: framed }, (res) => {
       let data = "";
       res.setEncoding("utf8");
       res.on("data", (chunk) => {
@@ -50,7 +53,7 @@ function fakeSession({ owner, clientIP = "10.1.1.1", bytesSent = 0 }) {
   };
 }
 
-async function startServer({ env = {}, usage = null } = {}) {
+async function startServer({ env = {}, usage = null, wrapAuthenticate = (fn) => fn } = {}) {
   const config = resolveConfig({
     RELAY_MODE: "hosted",
     ADMIN_SESSION_SECRET: "s",
@@ -62,7 +65,8 @@ async function startServer({ env = {}, usage = null } = {}) {
   await db.migrate();
   const users = createUserStore(db, { bcryptRounds: 4 });
   const apiTokens = createApiTokenStore(db);
-  const authenticate = createAuthenticator({ config, users, apiTokens, log: quietLog });
+  const invites = createInviteStore(db);
+  const authenticate = wrapAuthenticate(createAuthenticator({ config, users, apiTokens, log: quietLog }));
 
   const activeSessions = new Map();
   const registry = {
@@ -72,12 +76,23 @@ async function startServer({ env = {}, usage = null } = {}) {
       session.ws.close(code, reason);
       return true;
     },
+    killOwner(owner, code, reason) {
+      let killed = 0;
+      activeSessions.forEach((session) => {
+        if (session.identity.owner === owner) {
+          session.ws.close(code, reason);
+          killed += 1;
+        }
+      });
+      return killed;
+    },
   };
   const tiers = resolveTiers(null, { rateLimitBps: 1000, dnsServerIp: "8.8.8.8", maxUdpFlows: 10, maxConnectionsPerIp: 5, enableVmToVm: false });
   const userApi = createUserApi({
     authenticate,
     users: () => users,
     apiTokens,
+    invites,
     usage,
     registry,
     activeSessions,
@@ -93,7 +108,7 @@ async function startServer({ env = {}, usage = null } = {}) {
     userApi,
   });
   const address = await server.listen(0, "127.0.0.1");
-  return { server, port: address.port, db, users, apiTokens, activeSessions, tiers };
+  return { server, port: address.port, db, users, apiTokens, invites, activeSessions, tiers };
 }
 
 test("public tier view exposes only user-facing limits", () => {
@@ -265,4 +280,74 @@ test("usage comes from the meter; CORS applies to account routes; anonymous iden
   await anonApi.handle({ method: "GET", headers: { authorization: "Bearer anon" }, url: "/api/me" }, res, { path: "/api/me", clientIP: "1.2.3.4" });
   assert.equal(captured[0].status, 403);
   assert.ok(AuthError);
+});
+
+test("pending accounts can read, redeem an invite and nothing else", async () => {
+  const { server, port, users, apiTokens, invites } = await startServer();
+  try {
+    const erin = await users.create({ username: "erin", status: "pending" });
+    const token = (await apiTokens.create({ userId: erin.id })).token;
+    const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+
+    const me = await request(port, { path: "/api/me", headers });
+    assert.equal(me.status, 200);
+    assert.equal(me.json().user.status, "pending");
+    const mint = await request(port, { method: "POST", path: "/api/me/tokens", headers, body: "{}" });
+    assert.equal(mint.status, 403);
+    assert.equal(mint.json().error, "account-pending");
+
+    const bad = await request(port, { method: "POST", path: "/api/me/redeem", headers, body: JSON.stringify({ code: "RLY-0000-0000-0000" }) });
+    assert.equal(bad.status, 400);
+    const invite = await invites.create({});
+    const good = await request(port, { method: "POST", path: "/api/me/redeem", headers, body: JSON.stringify({ code: invite.code.toLowerCase() }) });
+    assert.equal(good.status, 200);
+    assert.equal((await users.findById(erin.id)).status, "active");
+    assert.equal((await request(port, { method: "POST", path: "/api/me/redeem", headers, body: JSON.stringify({ code: invite.code }) })).status, 409);
+    assert.equal((await request(port, { method: "POST", path: "/api/me/tokens", headers, body: "{}" })).status, 201);
+
+    // Guessing is throttled per account.
+    const frank = await users.create({ username: "frank", status: "pending" });
+    const frankHeaders = { Authorization: `Bearer ${(await apiTokens.create({ userId: frank.id })).token}` };
+    for (let i = 0; i < 10; i += 1) {
+      const r = await request(port, { method: "POST", path: "/api/me/redeem", headers: frankHeaders, body: JSON.stringify({ code: "nope" }) });
+      assert.equal(r.status, 400);
+    }
+    const spare = await invites.create({});
+    const throttled = await request(port, { method: "POST", path: "/api/me/redeem", headers: frankHeaders, body: JSON.stringify({ code: spare.code }) });
+    assert.equal(throttled.status, 429);
+  } finally {
+    await server.close();
+  }
+});
+
+test("account deletion needs a sign-in and the username typed back", async () => {
+  // Treat bearers prefixed "jwt:" as signed-in sessions for the same account.
+  const wrap = (fn) => async (token, ctx) => {
+    if (token.startsWith("jwt:")) return { ...(await fn(token.slice(4), ctx)), via: "jwt" };
+    return fn(token, ctx);
+  };
+  const { server, port, users, apiTokens, activeSessions } = await startServer({ wrapAuthenticate: wrap });
+  try {
+    const gina = await users.create({ username: "gina" });
+    const token = (await apiTokens.create({ userId: gina.id })).token;
+    const session = fakeSession({ owner: `user:${gina.id}` });
+    activeSessions.set("s-gina", session);
+
+    const viaToken = await request(port, { method: "DELETE", path: "/api/me", headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify({ confirm: "gina" }) });
+    assert.equal(viaToken.status, 403);
+    assert.equal(viaToken.json().error, "sign-in-required");
+
+    const signedIn = { Authorization: `Bearer jwt:${token}`, "Content-Type": "application/json" };
+    assert.equal((await request(port, { method: "DELETE", path: "/api/me", headers: signedIn, body: JSON.stringify({ confirm: "Gina" }) })).status, 400);
+    assert.equal((await request(port, { method: "DELETE", path: "/api/me", headers: signedIn, body: JSON.stringify({ confirm: "gina" }) })).status, 204);
+    assert.deepEqual(session.closed, [{ code: 1008, reason: "account deleted" }]);
+    assert.equal(await users.findById(gina.id), undefined);
+    assert.equal((await request(port, { path: "/api/me", headers: { Authorization: `Bearer ${token}` } })).status, 401);
+
+    const op = await users.create({ username: "ops", role: "operator" });
+    const opToken = (await apiTokens.create({ userId: op.id })).token;
+    assert.equal((await request(port, { method: "DELETE", path: "/api/me", headers: { Authorization: `Bearer jwt:${opToken}` }, body: JSON.stringify({ confirm: "ops" }) })).status, 403);
+  } finally {
+    await server.close();
+  }
 });

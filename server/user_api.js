@@ -5,12 +5,17 @@
 // account, usage, live sessions and API tokens, and manage the latter two.
 // Everything is scoped to the caller's identity; anonymous identities are
 // refused. The operator panel remains the only place to see other accounts.
+//
+// Pending accounts (SIGNUP_MODE=invite, invite not yet redeemed) can read
+// their account, redeem an invite and delete themselves; everything that
+// leads to relay access is refused with 403 account-pending.
 
 const { AuthError, extractCredential, readJsonBody, writeJson } = require("./public");
 
 const PREFIX = "/api/me";
 const MAX_ACTIVE_TOKENS = 20;
 const MAX_TOKEN_DAYS = 365;
+const REDEEM_FAILURES_PER_HOUR = 10;
 
 // Tier fields a user may see about their own limits.
 const PUBLIC_TIER_FIELDS = [
@@ -59,6 +64,7 @@ function createUserApi({
   authenticate,
   users,
   apiTokens,
+  invites = null,
   usage,
   registry,
   activeSessions,
@@ -75,9 +81,23 @@ function createUserApi({
     if (!credential || credential.source !== "header") {
       throw new AuthError(401, "authentication-required");
     }
-    const identity = await authenticate(credential.token, { clientIP, req });
+    const identity = await authenticate(credential.token, { clientIP, req, allowPending: true });
     if (!identity || !identity.userId) throw new AuthError(403, "account-required");
     return identity;
+  }
+
+  function requireActive(identity) {
+    if (identity.status === "pending") throw new AuthError(403, "account-pending");
+  }
+
+  // Failed redemptions per user in the last hour, to slow down guessing.
+  const redeemFailures = new Map(); // userId -> [timestamps]
+  function recentFailures(userId) {
+    const cutoff = now() - 60 * 60 * 1000;
+    const list = (redeemFailures.get(userId) || []).filter((t) => t > cutoff);
+    if (list.length) redeemFailures.set(userId, list);
+    else redeemFailures.delete(userId);
+    return list;
   }
 
   function ownSessions(identity) {
@@ -117,11 +137,51 @@ function createUserApi({
             status: user.status,
             createdAt: user.createdAt,
             lastLoginAt: user.lastLoginAt,
-          } : { id: identity.userId, username: identity.username, tier: identity.tier },
+          } : { id: identity.userId, username: identity.username, tier: identity.tier, status: identity.status },
           tier: publicTier(identity.tier, tiers),
           usage: await currentUsage(identity),
           activeSessions: ownSessions(identity).length,
         }];
+      },
+    },
+    {
+      method: "DELETE",
+      match: (path) => path === PREFIX,
+      async handle({ identity, req }) {
+        // Deleting an account needs a sign-in, not just an API token, and the
+        // username typed back as confirmation.
+        if (identity.via !== "jwt") return [403, { error: "sign-in-required" }];
+        if (identity.kind === "operator") return [403, { error: "operators are deleted from the admin panel" }];
+        const body = await readJsonBody(req);
+        if (!body || body.confirm !== identity.username) {
+          return [400, { error: "confirm must equal your username" }];
+        }
+        const killed = registry ? registry.killOwner(identity.owner, 1008, "account deleted") : 0;
+        await store(users).remove(identity.userId);
+        log?.info("account deleted by owner", { userId: identity.userId, killedSessions: killed });
+        return [204, null];
+      },
+    },
+    {
+      method: "POST",
+      match: (path) => path === `${PREFIX}/redeem`,
+      async handle({ identity, req }) {
+        if (identity.status !== "pending") return [409, { error: "account is already active" }];
+        const inviteStore = store(invites);
+        if (!inviteStore) return [404, { error: "invites are not enabled" }];
+        if (recentFailures(identity.userId).length >= REDEEM_FAILURES_PER_HOUR) {
+          return [429, { error: "too many attempts; try again later" }];
+        }
+        const body = await readJsonBody(req);
+        if (!(await inviteStore.redeem(body && body.code, identity.userId))) {
+          redeemFailures.set(identity.userId, [...recentFailures(identity.userId), now()]);
+          log?.warn("invite redemption failed", { userId: identity.userId });
+          return [400, { error: "invalid, used or expired invite code" }];
+        }
+        await store(users).setStatus(identity.userId, "active");
+        redeemFailures.delete(identity.userId);
+        log?.info("invite redeemed", { userId: identity.userId });
+        return [200, { status: "active" }];
       },
     },
     {
@@ -164,6 +224,7 @@ function createUserApi({
       method: "POST",
       match: (path) => path === `${PREFIX}/tokens`,
       async handle({ identity, req }) {
+        requireActive(identity);
         const body = await readJsonBody(req);
         const name = typeof body.name === "string" && body.name.trim() ? body.name.trim().slice(0, 64) : "default";
         let expiresAt = null;

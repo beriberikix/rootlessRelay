@@ -6,7 +6,7 @@
 const bcrypt = require("bcryptjs");
 
 const ROLES = new Set(["user", "operator"]);
-const STATUSES = new Set(["active", "banned"]);
+const STATUSES = new Set(["active", "pending", "banned"]);
 const USERNAME_RE = /^[a-zA-Z0-9._@+-]{1,128}$/;
 
 function nowIso(now) {
@@ -58,25 +58,26 @@ function createUserStore(db, { bcryptRounds = 12, now = Date.now } = {}) {
       return row.count;
     },
 
-    async create({ username, password = null, role = "user", tier = null }) {
+    async create({ username, password = null, role = "user", tier = null, status = "active" }) {
       if (typeof username !== "string" || !USERNAME_RE.test(username)) {
         throw new RangeError("username must be 1-128 characters of letters, digits, . _ @ + -");
       }
       if (!ROLES.has(role)) throw new RangeError(`role must be one of ${[...ROLES].join(", ")}`);
+      if (!STATUSES.has(status)) throw new RangeError(`status must be one of ${[...STATUSES].join(", ")}`);
       if (password !== null && (typeof password !== "string" || password.length < 8)) {
         throw new RangeError("password must be at least 8 characters");
       }
       const passwordHash = password === null ? null : await bcrypt.hash(password, bcryptRounds);
       const resolvedTier = tier || (role === "operator" ? "operator" : "user");
       const result = await db.run(
-        "INSERT INTO users (username, password_hash, role, tier, status, created_at) VALUES (?, ?, ?, ?, 'active', ?)",
-        [username, passwordHash, role, resolvedTier, nowIso(now)],
+        "INSERT INTO users (username, password_hash, role, tier, status, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        [username, passwordHash, role, resolvedTier, status, nowIso(now)],
       );
       return this.findById(result.lastID);
     },
 
     // External identity providers create users on first sight.
-    async upsertExternal({ externalSub, username, tier = "user" }) {
+    async upsertExternal({ externalSub, username, tier = "user", status = "active" }) {
       const existing = await this.findByExternalSub(externalSub);
       if (existing) return existing;
       let candidate = username && USERNAME_RE.test(username) ? username : externalSub.slice(0, 120);
@@ -84,14 +85,14 @@ function createUserStore(db, { bcryptRounds = 12, now = Date.now } = {}) {
         candidate = `${candidate.slice(0, 100)}#${externalSub.slice(-8)}`;
       }
       const result = await db.run(
-        "INSERT INTO users (username, password_hash, role, tier, status, external_sub, created_at) VALUES (?, NULL, 'user', ?, 'active', ?, ?)",
-        [candidate, tier, externalSub, nowIso(now)],
+        "INSERT INTO users (username, password_hash, role, tier, status, external_sub, created_at) VALUES (?, NULL, 'user', ?, ?, ?, ?)",
+        [candidate, tier, status, externalSub, nowIso(now)],
       );
       return this.findById(result.lastID);
     },
 
     async setStatus(id, status) {
-      if (!STATUSES.has(status)) throw new RangeError("status must be active or banned");
+      if (!STATUSES.has(status)) throw new RangeError(`status must be one of ${[...STATUSES].join(", ")}`);
       const result = await db.run("UPDATE users SET status = ? WHERE id = ?", [status, id]);
       return result.changes > 0;
     },

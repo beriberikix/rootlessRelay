@@ -191,18 +191,29 @@ async function verifyTurnstile({ secret, token, ip, fetchFn = globalThis.fetch }
   return Boolean(result && result.success);
 }
 
-function identityForUser(user) {
+function identityForUser(user, via = null) {
   return {
     kind: user.role === "operator" ? "operator" : "user",
     owner: `user:${user.id}`,
     userId: user.id,
     username: user.username,
     tier: user.tier || (user.role === "operator" ? "operator" : "user"),
+    status: user.status || "active",
+    via,
   };
 }
 
+// Banned accounts are always refused. Pending accounts (invite-only sign-up,
+// not yet redeemed) may reach the account API but not open sessions.
+function checkStatus(user, allowPending) {
+  if (user.status === "active") return;
+  if (user.status === "pending" && allowPending) return;
+  if (user.status === "pending") throw new AuthError(403, "account-pending");
+  throw new AuthError(403, "account-suspended");
+}
+
 function createAuthenticator({ config, users, apiTokens, anon = null, jwt = null, log = null }) {
-  return async function authenticate(token, { clientIP } = {}) {
+  return async function authenticate(token, { clientIP, allowPending = false } = {}) {
     if (!token) {
       if (config.authRequired) throw new AuthError(401, "authentication-required");
       return LOCAL_IDENTITY;
@@ -212,8 +223,8 @@ function createAuthenticator({ config, users, apiTokens, anon = null, jwt = null
       const result = await apiTokens.verify(token);
       if (!result) throw new AuthError(401, "invalid-token");
       if (!result.user) throw new AuthError(401, result.reason || "invalid-token");
-      if (result.user.status !== "active") throw new AuthError(403, "account-suspended");
-      return identityForUser(result.user);
+      checkStatus(result.user, allowPending);
+      return identityForUser(result.user, "api-token");
     }
 
     let unverified;
@@ -234,10 +245,11 @@ function createAuthenticator({ config, users, apiTokens, anon = null, jwt = null
         externalSub: `${verified.iss}|${verified.sub}`,
         username: verified.username,
         tier: config.jwt ? config.jwt.defaultTier : "user",
+        status: config.signupMode === "invite" ? "pending" : "active",
       });
-      if (user.status !== "active") throw new AuthError(403, "account-suspended");
+      checkStatus(user, allowPending);
       await users.touchLogin(user.id);
-      return identityForUser(user);
+      return identityForUser(user, "jwt");
     }
 
     log?.warn("token from unknown issuer", { issuer: unverified.iss, clientIP });

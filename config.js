@@ -105,6 +105,11 @@ function resolveConfig(env = process.env) {
     );
   }
 
+  const signupMode = env.SIGNUP_MODE || "open";
+  if (!["open", "invite"].includes(signupMode)) {
+    throw new ConfigError(`SIGNUP_MODE must be "open" or "invite", got "${signupMode}"`);
+  }
+
   const trustProxy = parseBool(env.TRUST_PROXY, defaults.trustProxy);
   const adminSessionSecret = env.ADMIN_SESSION_SECRET || DEFAULT_SESSION_SECRET;
 
@@ -125,6 +130,9 @@ function resolveConfig(env = process.env) {
       min: 1,
     }),
     turnstileSecret: env.TURNSTILE_SECRET || null,
+    // "invite": accounts first seen through an external identity provider
+    // start pending and cannot connect until they redeem an invite code.
+    signupMode,
 
     jwt: jwtConfigured
       ? {

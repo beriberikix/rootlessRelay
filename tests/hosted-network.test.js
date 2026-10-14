@@ -342,6 +342,16 @@ test("operator flow: users, tokens, sessions list, kill, ban, rules disabled", N
     const me = (await httpJson(relay.adminPort, { path: "/api/users", cookie })).body.find((u) => u.role === "operator");
     assert.equal((await httpJson(relay.adminPort, { method: "DELETE", path: `/api/users/${me.id}`, cookie })).status, 400);
 
+    const invite = await httpJson(relay.adminPort, { method: "POST", path: "/api/invites", cookie, body: { note: "beta tester", expiresInDays: 7 } });
+    assert.equal(invite.status, 201);
+    assert.match(invite.body.code, /^RLY-/);
+    assert.equal((await httpJson(relay.adminPort, { method: "POST", path: "/api/invites", cookie, body: { expiresInDays: 0 } })).status, 400);
+    const inviteList = await httpJson(relay.adminPort, { path: "/api/invites", cookie });
+    assert.deepEqual(inviteList.body.map((i) => [i.note, i.state, i.code]), [["beta tester", "open", undefined]]);
+    assert.equal((await httpJson(relay.adminPort, { method: "DELETE", path: `/api/invites/${invite.body.id}`, cookie })).status, 204);
+    assert.equal((await httpJson(relay.adminPort, { method: "DELETE", path: `/api/invites/${invite.body.id}`, cookie })).status, 404);
+    assert.equal((await httpJson(relay.adminPort, { path: "/api/config", cookie })).body.signupMode, "open");
+
     assert.equal((await httpJson(relay.adminPort, { path: "/api/rules", cookie })).status, 403);
     assert.equal((await httpJson(relay.adminPort, {
       method: "POST", path: "/api/rules", cookie,
