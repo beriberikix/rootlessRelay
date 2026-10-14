@@ -35,6 +35,9 @@
   port and the loopback admin port.
 - `METRICS_PUBLIC=true` serves `/metrics` without authentication for
   scrapers on a private network.
+- Account API under `/api/me` on the public listener: a signed-in user can
+  read their account, tier limits and usage, list and close their own
+  sessions, and create, list and revoke their own API tokens.
 
 ### Changed (fork)
 

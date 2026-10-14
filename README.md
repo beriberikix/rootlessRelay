@@ -274,6 +274,23 @@ scraper presenting `Authorization: Bearer $METRICS_TOKEN`. Set
 `METRICS_PUBLIC=true` to let an unauthenticated scraper read it when the
 admin port is only reachable over a private network.
 
+### Account API
+
+Signed-in users manage their own account on the public listener under
+`/api/me`, authenticated with `Authorization: Bearer <token>` where the token
+is an external JWT or one of their API tokens. Anonymous tokens are refused.
+Browser origins must be in `ALLOWED_ORIGINS`; CORS headers are emitted.
+
+| Route | Purpose |
+|---|---|
+| `GET /api/me` | Account, tier limits, current-period usage, active session count. |
+| `GET /api/me/usage` | Current period plus up to 12 monthly rows. |
+| `GET /api/me/sessions` | The caller's live sessions. |
+| `DELETE /api/me/sessions/:id` | Close one of the caller's sessions (code 1008). |
+| `GET /api/me/tokens` | The caller's API tokens (never the secrets). |
+| `POST /api/me/tokens` | Create a token: `{ "name", "expiresInDays"? }`. The secret is returned once. At most 20 active tokens. |
+| `DELETE /api/me/tokens/:id` | Revoke one of the caller's tokens. |
+
 ### Hosted-mode settings
 
 | Setting | Purpose | Local default | Hosted default |

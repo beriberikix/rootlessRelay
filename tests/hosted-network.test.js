@@ -339,6 +339,57 @@ test("operator flow: users, tokens, sessions list, kill, ban, rules disabled", N
   }
 });
 
+test("account API: a user sees and manages only their own sessions and tokens", NETWORK, async () => {
+  const relay = await startRelay({ hosted: true });
+  try {
+    const cookie = await relay.adminCookie();
+    const dave = (await httpJson(relay.adminPort, { method: "POST", path: "/api/users", cookie, body: { username: "dave", password: "dave-password" } })).body;
+    const erin = (await httpJson(relay.adminPort, { method: "POST", path: "/api/users", cookie, body: { username: "erin", password: "erin-password" } })).body;
+    const daveToken = (await httpJson(relay.adminPort, { method: "POST", path: `/api/users/${dave.id}/tokens`, cookie, body: { name: "seed" } })).body.token;
+    const erinToken = (await httpJson(relay.adminPort, { method: "POST", path: `/api/users/${erin.id}/tokens`, cookie, body: { name: "seed" } })).body.token;
+    const asDave = { Authorization: `Bearer ${daveToken}` };
+    const asErin = { Authorization: `Bearer ${erinToken}` };
+
+    assert.equal((await httpJson(relay.wsPort, { path: "/api/me" })).status, 401);
+    const anon = await anonToken(relay);
+    assert.equal((await httpJson(relay.wsPort, { path: "/api/me", headers: { Authorization: `Bearer ${anon}` } })).status, 403);
+
+    const me = await httpJson(relay.wsPort, { path: "/api/me", headers: asDave });
+    assert.equal(me.status, 200);
+    assert.equal(me.body.user.username, "dave");
+    assert.equal(me.body.tier.name, "user");
+    assert.equal(me.body.activeSessions, 0);
+
+    const conn = await openWebSocket(relay.wsPort, { bearer: daveToken });
+    assert.equal(conn.status, 101);
+    await delay(30);
+    const mine = await httpJson(relay.wsPort, { path: "/api/me/sessions", headers: asDave });
+    assert.equal(mine.body.length, 1);
+    assert.equal((await httpJson(relay.wsPort, { path: "/api/me/sessions", headers: asErin })).body.length, 0);
+    const sessionId = mine.body[0].sessionId;
+    assert.equal((await httpJson(relay.wsPort, { method: "DELETE", path: `/api/me/sessions/${sessionId}`, headers: asErin })).status, 404);
+    const closed = new Promise((resolve) => conn.ws.once("close", (code, reason) => resolve({ code, reason: reason.toString() })));
+    assert.equal((await httpJson(relay.wsPort, { method: "DELETE", path: `/api/me/sessions/${sessionId}`, headers: asDave })).status, 204);
+    assert.deepEqual(await closed, { code: 1008, reason: "terminated by account owner" });
+
+    const created = await httpJson(relay.wsPort, { method: "POST", path: "/api/me/tokens", headers: asDave, body: { name: "laptop", expiresInDays: 7 } });
+    assert.equal(created.status, 201);
+    assert.equal((await openWebSocket(relay.wsPort, { token: created.body.token })).status, 101);
+    const list = await httpJson(relay.wsPort, { path: "/api/me/tokens", headers: asDave });
+    assert.deepEqual(list.body.map((t) => t.name), ["seed", "laptop"]);
+    assert.equal((await httpJson(relay.wsPort, { method: "DELETE", path: `/api/me/tokens/${created.body.id}`, headers: asErin })).status, 404);
+    assert.equal((await httpJson(relay.wsPort, { method: "DELETE", path: `/api/me/tokens/${created.body.id}`, headers: asDave })).status, 204);
+    assert.equal((await openWebSocket(relay.wsPort, { token: created.body.token })).status, 401);
+
+    const usage = await httpJson(relay.wsPort, { path: "/api/me/usage", headers: asDave });
+    assert.equal(usage.status, 200);
+    assert.equal(usage.body.current.period, "month");
+    assert.ok(Array.isArray(usage.body.months));
+  } finally {
+    await relay.close();
+  }
+});
+
 test("audit log, usage, metrics and quota enforcement", NETWORK, async () => {
   const relay = await startRelay({
     hosted: true,

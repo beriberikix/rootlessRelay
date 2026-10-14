@@ -2,7 +2,8 @@
 
 // The single public listener: WebSocket upgrades (with authentication and
 // admission control in front of the handshake), /healthz, the anonymous
-// token endpoint and CORS for the browser frontend. Replaces the WS/WSS
+// token endpoint, the account-scoped /api/me routes (server/user_api.js) and
+// CORS for the browser frontend. Replaces the WS/WSS
 // server creation that used to live in relay.js.
 
 const http = require("http");
@@ -137,6 +138,7 @@ function createPublicServer({
   handleAnonToken = null,
   adminApp = null,
   metrics = null,
+  userApi = null,
 }) {
   const allowedOrigins = config.allowedOrigins ? new Set(config.allowedOrigins) : null;
 
@@ -150,7 +152,7 @@ function createPublicServer({
     if (!origin || !originAllowed(origin)) return {};
     return {
       "Access-Control-Allow-Origin": origin,
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, Authorization",
       "Access-Control-Max-Age": "600",
       Vary: "Origin",
@@ -214,6 +216,20 @@ function createPublicServer({
         if (status >= 500) log?.error("anon token error", { error });
         writeJson(res, status, { error: error.code || error.message || "error" }, corsHeaders(req));
       }
+      return;
+    }
+
+    if (userApi && userApi.matches(path)) {
+      if (req.headers.origin && !originAllowed(req.headers.origin)) {
+        writeJson(res, 403, { error: "origin not allowed" });
+        return;
+      }
+      const clientIP = resolveClientIP(req, {
+        trustProxy: config.trustProxy,
+        hops: config.trustProxyHops,
+        header: config.clientIpHeader,
+      });
+      await userApi.handle(req, res, { path, clientIP, corsHeaders: corsHeaders(req) });
       return;
     }
 

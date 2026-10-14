@@ -13,6 +13,7 @@ const { createEgressPolicy } = require("./policy/egress");
 const { resolveTiers } = require("./policy/tiers");
 const { createPolicyFactory } = require("./policy/session_policy");
 const { AuthError, createPublicServer } = require("./server/public");
+const { createUserApi } = require("./server/user_api");
 const { attachConnectionHandler, createSessionRegistry } = require("./server/connection");
 const { installLifecycle } = require("./server/lifecycle");
 const { openDatabase } = require("./auth/db");
@@ -143,6 +144,20 @@ function init(ctx) {
     const tls = ENABLE_WSS
       ? { cert: fs.readFileSync("cert.pem"), key: fs.readFileSync("key.pem") }
       : null;
+    // Account self-service routes; the stores are read lazily because the
+    // database opens after the listener starts.
+    const userApi = config.authRequired
+      ? createUserApi({
+        authenticate,
+        users: () => state.users,
+        apiTokens: () => state.apiTokens,
+        usage,
+        registry,
+        activeSessions: ctx.activeSessions,
+        tiers,
+        log,
+      })
+      : null;
     const publicServer = createPublicServer({
       config,
       log,
@@ -154,6 +169,7 @@ function init(ctx) {
       sessionCount: () => registry.size,
       handleAnonToken: config.anonEnabled ? handleAnonToken : null,
       metrics,
+      userApi,
     });
     state.publicServer = publicServer;
     lifecycle.addServer(publicServer.server);
