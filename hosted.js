@@ -6,14 +6,19 @@
 // observable behavior matches upstream rootlessRelay.
 
 const fs = require("fs");
+const path = require("path");
 const { resolveConfig } = require("./config");
 const { createLogger } = require("./log");
 const { createEgressPolicy } = require("./policy/egress");
 const { resolveTiers } = require("./policy/tiers");
 const { createPolicyFactory } = require("./policy/session_policy");
-const { createPublicServer } = require("./server/public");
+const { AuthError, createPublicServer } = require("./server/public");
 const { attachConnectionHandler, createSessionRegistry } = require("./server/connection");
 const { installLifecycle } = require("./server/lifecycle");
+const { openDatabase } = require("./auth/db");
+const { createUserStore } = require("./auth/users");
+const { SqliteSessionStore } = require("./auth/session_store");
+const tokens = require("./auth/tokens");
 const admin = require("./admin/app");
 
 const POOL_PREFIX = "10.0.2.";
@@ -25,6 +30,8 @@ function init(ctx) {
   log.info("relay mode", {
     mode: config.mode,
     authRequired: config.authRequired,
+    anonEnabled: config.anonEnabled,
+    externalJwt: Boolean(config.jwt),
     egressPolicy: config.egressPolicy,
     inboundRules: config.inboundRulesEnabled,
     antiSpoof: config.antiSpoof,
@@ -68,13 +75,35 @@ function init(ctx) {
     log,
   });
 
+  // Identity services become available once the database is open; upgrade
+  // requests that arrive earlier wait on `ready`.
   const state = {
+    db: null,
+    users: null,
+    apiTokens: null,
+    anon: null,
+    jwt: null,
     authenticate: null,
     handleAnonToken: null,
     publicServer: null,
     adminServer: null,
-    db: null,
   };
+  let resolveReady;
+  const ready = new Promise((resolve) => {
+    resolveReady = resolve;
+  });
+
+  async function authenticate(token, context) {
+    await ready;
+    if (!state.authenticate) throw new AuthError(503, "identity-unavailable");
+    return state.authenticate(token, context);
+  }
+
+  async function handleAnonToken(request) {
+    await ready;
+    if (!state.handleAnonToken) throw new AuthError(404, "anonymous-access-disabled");
+    return state.handleAnonToken(request);
+  }
 
   function createWebSocketServer({ ENABLE_WSS, WS_PORT, WS_BIND_ADDRESS, maxPayload }) {
     const tls = ENABLE_WSS
@@ -84,12 +113,12 @@ function init(ctx) {
       config,
       log,
       tls,
-      authenticate: (...args) => (state.authenticate ? state.authenticate(...args) : rejectNoAuth()),
+      authenticate,
       admission: registry,
       wssOptions: { maxPayload },
       lifecycle,
       sessionCount: () => registry.size,
-      handleAnonToken: (...args) => (state.handleAnonToken ? state.handleAnonToken(...args) : rejectNoAnon()),
+      handleAnonToken: config.anonEnabled ? handleAnonToken : null,
     });
     state.publicServer = publicServer;
     lifecycle.addServer(publicServer.server);
@@ -108,16 +137,6 @@ function init(ctx) {
     return publicServer.wss;
   }
 
-  function rejectNoAuth() {
-    const { AuthError } = require("./server/public");
-    throw new AuthError(401, "authentication required");
-  }
-
-  function rejectNoAnon() {
-    const { AuthError } = require("./server/public");
-    throw new AuthError(404, "anonymous access is disabled");
-  }
-
   function attach(wss, VMSession) {
     attachConnectionHandler(wss, {
       VMSession,
@@ -130,33 +149,91 @@ function init(ctx) {
     });
   }
 
-  function startAdmin(rules) {
-    const dbPath = config.adminAuthDbPath || require("path").join(__dirname, "admin_auth.sqlite");
-    const db = admin.openDatabase(dbPath);
+  async function initializeIdentity() {
+    const dbPath = config.adminAuthDbPath || path.join(__dirname, "admin_auth.sqlite");
+    const db = openDatabase(dbPath);
+    await db.migrate();
     state.db = db;
-    const app = admin.createAdminApp({
+    state.users = createUserStore(db);
+    state.apiTokens = tokens.createApiTokenStore(db);
+    if (config.anonEnabled && config.anonTokenSecret) {
+      state.anon = tokens.createAnonIssuer({
+        secret: config.anonTokenSecret,
+        ttlMs: config.anonTokenTtlMs,
+        bindIp: config.anonTokenBindIp,
+        perIpPerHour: config.anonTokensPerIpPerHour,
+      });
+    }
+    if (config.jwt) {
+      state.jwt = tokens.createJwtVerifier({
+        issuer: config.jwt.issuer,
+        audience: config.jwt.audience,
+        jwksUrl: config.jwt.jwksUrl,
+        usernameClaim: config.jwt.usernameClaim,
+      });
+    }
+    state.authenticate = tokens.createAuthenticator({
       config,
-      db,
-      activeSessions: ctx.activeSessions,
-      registry,
-      rules,
-      proxyPort: ctx.PROXY_PORT,
-      poolCtx: { poolPrefix: POOL_PREFIX, dhcpStart: ctx.DHCP_START, dhcpEnd: ctx.DHCP_END },
+      users: state.users,
+      apiTokens: state.apiTokens,
+      anon: state.anon,
+      jwt: state.jwt,
       log,
     });
-    admin.initializeAdminAuth({ db, config, log })
-      .then(() => admin.startAdminServer(app, { port: ctx.ADMIN_PORT, host: ctx.ADMIN_BIND_ADDRESS, log }))
-      .then((server) => {
-        state.adminServer = server;
-        lifecycle.addServer(server);
-        console.log(`💡 Admin UI listening on http://${ctx.ADMIN_BIND_ADDRESS}:${ctx.ADMIN_PORT}`);
-      })
-      .catch((error) => {
-        log.error("failed to start admin server", { error });
-        lifecycle.shutdown("admin start failed", 1);
-      });
+    if (state.anon) {
+      state.handleAnonToken = async ({ body, clientIP }) => {
+        if (config.turnstileSecret) {
+          const ok = await tokens.verifyTurnstile({
+            secret: config.turnstileSecret,
+            token: body && body.turnstileToken,
+            ip: clientIP,
+          });
+          if (!ok) throw new AuthError(403, "captcha-failed");
+        }
+        const issued = await state.anon.issue({ ip: clientIP });
+        log.info("anon token issued", { clientIP });
+        return { token: issued.token, expiresAt: issued.expiresAt, tier: "anon" };
+      };
+    }
     lifecycle.addFlusher(() => db.close());
-    return { app, db };
+    return db;
+  }
+
+  function startAdmin(rules) {
+    const run = async () => {
+      const db = await initializeIdentity();
+      await admin.bootstrapOperator({ users: state.users, config, log });
+      admin.configurePassport({ users: state.users });
+      const sessionStore = new SqliteSessionStore({ db });
+      lifecycle.addFlusher(() => sessionStore.close());
+      const app = admin.createAdminApp({
+        config,
+        users: state.users,
+        apiTokens: state.apiTokens,
+        sessionStore,
+        activeSessions: ctx.activeSessions,
+        registry,
+        rules,
+        proxyPort: ctx.PROXY_PORT,
+        poolCtx: { poolPrefix: POOL_PREFIX, dhcpStart: ctx.DHCP_START, dhcpEnd: ctx.DHCP_END },
+        tiers,
+        log,
+      });
+      const server = await admin.startAdminServer(app, {
+        port: ctx.ADMIN_PORT,
+        host: ctx.ADMIN_BIND_ADDRESS,
+        log,
+      });
+      state.adminServer = server;
+      lifecycle.addServer(server);
+      console.log(`💡 Admin UI listening on http://${ctx.ADMIN_BIND_ADDRESS}:${ctx.ADMIN_PORT}`);
+    };
+    run()
+      .catch((error) => {
+        log.error("failed to start identity/admin services", { error, stack: error && error.stack });
+        lifecycle.shutdown("admin start failed", 1);
+      })
+      .finally(resolveReady);
   }
 
   return {
@@ -168,6 +245,7 @@ function init(ctx) {
     policyFactory,
     lifecycle,
     state,
+    ready,
     createWebSocketServer,
     attachConnectionHandler: attach,
     startAdmin,

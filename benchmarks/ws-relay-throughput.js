@@ -537,7 +537,7 @@ async function runBenchmark(options) {
     await receiver.close();
     await stopChild(child);
     adminCookie = null;
-    fs.rm(adminDbPath, { force: true }, () => {});
+    for (const suffix of ["", "-wal", "-shm"]) fs.rm(`${adminDbPath}${suffix}`, { force: true }, () => {});
   }
 }
 

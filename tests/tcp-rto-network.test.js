@@ -217,7 +217,7 @@ async function startRelay(overrides = {}) {
     async close() {
       ws.close();
       adminCookies.delete(adminPort);
-      fs.rm(adminDbPath, { force: true }, () => {});
+      for (const suffix of ["", "-wal", "-shm"]) fs.rm(`${adminDbPath}${suffix}`, { force: true }, () => {});
       if (child.exitCode !== null) return;
       child.kill("SIGTERM");
       await Promise.race([

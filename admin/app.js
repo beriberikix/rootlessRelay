@@ -1,7 +1,8 @@
 "use strict";
 
-// Operator admin API and UI (moved out of relay.js). Local username/password
-// auth with Passport and SQLite; sessions, inbound rules and configuration.
+// Operator admin API and UI. Operators log in with username/password via
+// Passport; sessions persist in SQLite. End users, API tokens, inbound rules,
+// live sessions and configuration are managed here.
 
 const http = require("http");
 const path = require("path");
@@ -9,95 +10,52 @@ const express = require("express");
 const passport = require("passport");
 const LocalStrategy = require("passport-local").Strategy;
 const expressSession = require("express-session");
-const bcrypt = require("bcryptjs");
-const sqlite3 = require("sqlite3");
 const { validateRule } = require("./rules");
+const { publicUser } = require("../auth/users");
 
-function openDatabase(dbPath) {
-  const db = new sqlite3.Database(dbPath);
-  return {
-    raw: db,
-    run(sql, params = []) {
-      return new Promise((resolve, reject) => {
-        db.run(sql, params, function onRun(err) {
-          if (err) reject(err);
-          else resolve(this);
-        });
-      });
-    },
-    get(sql, params = []) {
-      return new Promise((resolve, reject) => {
-        db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)));
-      });
-    },
-    all(sql, params = []) {
-      return new Promise((resolve, reject) => {
-        db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)));
-      });
-    },
-    close() {
-      return new Promise((resolve) => db.close(() => resolve()));
-    },
-  };
+async function bootstrapOperator({ users, config, log }) {
+  if ((await users.countOperators()) > 0) return;
+  if (config.adminBootstrapUsername && config.adminBootstrapPassword) {
+    await users.create({
+      username: config.adminBootstrapUsername,
+      password: config.adminBootstrapPassword,
+      role: "operator",
+    });
+    log?.info("bootstrapped initial operator", { username: config.adminBootstrapUsername });
+    return;
+  }
+  // Keep the data plane running; admin logins fail until an operator exists.
+  log?.warn(
+    "no operator accounts found; set ADMIN_BOOTSTRAP_USERNAME and ADMIN_BOOTSTRAP_PASSWORD to create one",
+  );
 }
 
-async function initializeAdminAuth({ db, config, log }) {
-  await db.run(`
-    CREATE TABLE IF NOT EXISTS admin_users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT NOT NULL UNIQUE,
-      password_hash TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      last_login_at TEXT
-    )
-  `);
-
-  const countRow = await db.get("SELECT COUNT(*) AS count FROM admin_users");
-  if (countRow.count === 0) {
-    if (config.adminBootstrapUsername && config.adminBootstrapPassword) {
-      const passwordHash = await bcrypt.hash(config.adminBootstrapPassword, 12);
-      await db.run(
-        "INSERT INTO admin_users (username, password_hash, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-        [config.adminBootstrapUsername, passwordHash],
-      );
-      log?.info("bootstrapped initial admin user", { username: config.adminBootstrapUsername });
-    } else {
-      // Keep the data plane running; admin logins fail until a user exists.
-      log?.warn(
-        "no admin users found; set ADMIN_BOOTSTRAP_USERNAME and ADMIN_BOOTSTRAP_PASSWORD to create one",
-      );
-    }
-  }
-
+function configurePassport({ users }) {
   passport.use(
     new LocalStrategy(async (username, password, done) => {
       try {
-        const user = await db.get(
-          "SELECT id, username, password_hash FROM admin_users WHERE username = ?",
-          [username],
-        );
-        if (!user) {
+        const user = await users.findByUsername(username);
+        if (!user || user.role !== "operator" || user.status !== "active" ||
+          !(await users.verifyPassword(user, password))) {
           done(null, false, { message: "Invalid username or password" });
           return;
         }
-        const validPassword = await bcrypt.compare(password, user.password_hash);
-        if (!validPassword) {
-          done(null, false, { message: "Invalid username or password" });
-          return;
-        }
-        await db.run("UPDATE admin_users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?", [user.id]);
-        done(null, { id: user.id, username: user.username });
+        await users.touchLogin(user.id);
+        done(null, { id: user.id, username: user.username, role: user.role });
       } catch (error) {
         done(error);
       }
     }),
   );
-
   passport.serializeUser((user, done) => done(null, user.id));
   passport.deserializeUser(async (id, done) => {
     try {
-      const user = await db.get("SELECT id, username FROM admin_users WHERE id = ?", [id]);
-      done(null, user || false);
+      const user = await users.findById(id);
+      if (!user || user.role !== "operator" || user.status !== "active") {
+        done(null, false);
+        return;
+      }
+      done(null, { id: user.id, username: user.username, role: user.role });
     } catch (error) {
       done(error);
     }
@@ -162,20 +120,35 @@ function sessionSummary(sessionId, session) {
     owner: identity.owner,
     tier: identity.tier,
     kind: identity.kind,
+    userId: identity.userId || null,
     username: identity.username || null,
     startedAt: session.startedAt ? new Date(session.startedAt).toISOString() : null,
     policy: session.policy ? session.policy.counters : null,
   };
 }
 
+function asyncRoute(fn) {
+  return (req, res, next) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+  };
+}
+
+function parseId(value) {
+  const id = Number.parseInt(value, 10);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
 function createAdminApp({
   config,
-  db,
+  users,
+  apiTokens,
+  sessionStore,
   activeSessions,
   registry,
   rules,
   proxyPort,
   poolCtx,
+  tiers = null,
   adminHtmlPath = path.join(__dirname, "..", "admin.html"),
   log,
 }) {
@@ -193,6 +166,7 @@ function createAdminApp({
     expressSession({
       name: "admin.sid",
       secret: config.adminSessionSecret,
+      store: sessionStore,
       resave: false,
       saveUninitialized: false,
       cookie: {
@@ -277,8 +251,12 @@ function createAdminApp({
       proxyPort,
       authRequired: config.authRequired,
       anonEnabled: config.anonEnabled,
+      externalJwt: Boolean(config.jwt),
+      tiers: tiers ? Object.keys(tiers) : [],
     });
   });
+
+  // --- live sessions -------------------------------------------------------
 
   app.get("/api/sessions", (_req, res) => {
     const sessions = [];
@@ -317,6 +295,133 @@ function createAdminApp({
     log?.info("session killed by operator", { sessionId: req.params.sessionId, by: req.user.username });
     res.sendStatus(204);
   });
+
+  // --- users and API tokens -------------------------------------------------
+
+  app.get("/api/users", asyncRoute(async (_req, res) => {
+    res.status(200).json(await users.list());
+  }));
+
+  app.post("/api/users", asyncRoute(async (req, res) => {
+    const { username, password, role, tier } = req.body || {};
+    try {
+      const user = await users.create({
+        username,
+        password: password === undefined || password === "" ? null : password,
+        role: role || "user",
+        tier: tier || null,
+      });
+      log?.info("user created", { userId: user.id, username: user.username, role: user.role, by: req.user.username });
+      res.status(201).json(publicUser(user));
+    } catch (error) {
+      if (error instanceof RangeError) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      if (/UNIQUE/.test(error.message)) {
+        res.status(409).json({ error: "username already exists" });
+        return;
+      }
+      throw error;
+    }
+  }));
+
+  app.get("/api/users/:id", asyncRoute(async (req, res) => {
+    const id = parseId(req.params.id);
+    const user = id ? await users.findById(id) : null;
+    if (!user) {
+      res.sendStatus(404);
+      return;
+    }
+    res.status(200).json({ ...publicUser(user), tokens: await apiTokens.listForUser(id) });
+  }));
+
+  app.post("/api/users/:id/tokens", asyncRoute(async (req, res) => {
+    const id = parseId(req.params.id);
+    const user = id ? await users.findById(id) : null;
+    if (!user) {
+      res.sendStatus(404);
+      return;
+    }
+    const { name, expiresAt } = req.body || {};
+    if (expiresAt !== undefined && expiresAt !== null && Number.isNaN(new Date(expiresAt).getTime())) {
+      res.status(400).json({ error: "expiresAt must be an ISO timestamp" });
+      return;
+    }
+    const created = await apiTokens.create({
+      userId: id,
+      name: typeof name === "string" && name ? name : "default",
+      expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
+    });
+    log?.info("api token created", { userId: id, tokenId: created.id, by: req.user.username });
+    res.status(201).json(created);
+  }));
+
+  app.delete("/api/tokens/:id", asyncRoute(async (req, res) => {
+    const id = parseId(req.params.id);
+    if (!id || !(await apiTokens.revoke(id))) {
+      res.sendStatus(404);
+      return;
+    }
+    log?.info("api token revoked", { tokenId: id, by: req.user.username });
+    res.sendStatus(204);
+  }));
+
+  async function setUserStatus(req, res, status) {
+    const id = parseId(req.params.id);
+    const user = id ? await users.findById(id) : null;
+    if (!user) {
+      res.sendStatus(404);
+      return;
+    }
+    if (status === "banned" && user.id === req.user.id) {
+      res.status(400).json({ error: "cannot ban yourself" });
+      return;
+    }
+    await users.setStatus(id, status);
+    let killed = 0;
+    if (status === "banned" && registry) killed = registry.killOwner(`user:${id}`, 1008, "account suspended");
+    log?.info("user status changed", { userId: id, status, killedSessions: killed, by: req.user.username });
+    res.status(200).json({ ...publicUser(await users.findById(id)), killedSessions: killed });
+  }
+
+  app.post("/api/users/:id/ban", asyncRoute((req, res) => setUserStatus(req, res, "banned")));
+  app.post("/api/users/:id/unban", asyncRoute((req, res) => setUserStatus(req, res, "active")));
+
+  app.post("/api/users/:id/tier", asyncRoute(async (req, res) => {
+    const id = parseId(req.params.id);
+    const tier = req.body && req.body.tier;
+    if (!id || !(await users.findById(id))) {
+      res.sendStatus(404);
+      return;
+    }
+    if (tiers && !tiers[tier]) {
+      res.status(400).json({ error: `unknown tier; known tiers: ${Object.keys(tiers).join(", ")}` });
+      return;
+    }
+    await users.setTier(id, tier);
+    res.status(200).json(publicUser(await users.findById(id)));
+  }));
+
+  app.post("/api/users/:id/password", asyncRoute(async (req, res) => {
+    const id = parseId(req.params.id);
+    if (!id || !(await users.findById(id))) {
+      res.sendStatus(404);
+      return;
+    }
+    try {
+      await users.setPassword(id, req.body && req.body.password);
+    } catch (error) {
+      if (error instanceof RangeError) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      throw error;
+    }
+    res.sendStatus(204);
+  }));
+
+  // --- inbound rules --------------------------------------------------------
 
   function requireRules(_req, res, next) {
     if (!config.inboundRulesEnabled) {
@@ -385,10 +490,10 @@ function startAdminServer(app, { port, host, log }) {
 }
 
 module.exports = {
+  bootstrapOperator,
+  configurePassport,
   createAdminApp,
   createLoginRateLimiter,
-  initializeAdminAuth,
-  openDatabase,
   requireAdminAuth,
   sessionSummary,
   startAdminServer,
