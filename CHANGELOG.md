@@ -61,6 +61,12 @@
 - The SQLite database runs with `synchronous=NORMAL` and a 5 s
   `busy_timeout`, as WAL-shipping backups such as Litestream expect.
 
+- Operator single sign-on for the admin panel through OIDC (`ADMIN_OIDC_*`):
+  authorization code flow with PKCE, accepted only for an active operator
+  whose external identity matches, and by default only with MFA (`amr`).
+  `ADMIN_PASSWORD_LOGIN=false` turns the password form off.
+  `POST /api/users/:id/role` and a panel button promote or demote operators.
+
 ### Security (fork)
 
 Fixes from a review of the hosted code paths:
@@ -86,6 +92,7 @@ Fixes from a review of the hosted code paths:
   (an unverified email is not used as the username).
 - Invite redemption is one statement that also refuses a second code for the
   same account; concurrent first logins no longer fail on the unique key.
+- Admin session cookie is SameSite=Lax (needed for the OIDC redirect).
 - Admin API: no form-encoded bodies, and state-changing requests carrying an
   Origin must come from the panel's own host (CSRF via `fly proxy` on
   localhost).

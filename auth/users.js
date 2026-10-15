@@ -105,6 +105,12 @@ function createUserStore(db, { bcryptRounds = 12, now = Date.now } = {}) {
       return result.changes > 0;
     },
 
+    async setRole(id, role) {
+      if (!ROLES.has(role)) throw new RangeError(`role must be one of ${[...ROLES].join(", ")}`);
+      const result = await db.run("UPDATE users SET role = ? WHERE id = ?", [role, id]);
+      return result.changes > 0;
+    },
+
     async setTier(id, tier) {
       if (typeof tier !== "string" || !tier) throw new RangeError("tier is required");
       const result = await db.run("UPDATE users SET tier = ? WHERE id = ?", [tier, id]);

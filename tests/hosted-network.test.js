@@ -341,6 +341,13 @@ test("operator flow: users, tokens, sessions list, kill, ban, rules disabled", N
     assert.equal((await httpJson(relay.adminPort, { method: "DELETE", path: `/api/users/${doomed.body.id}`, cookie })).status, 404);
     const me = (await httpJson(relay.adminPort, { path: "/api/users", cookie })).body.find((u) => u.role === "operator");
     assert.equal((await httpJson(relay.adminPort, { method: "DELETE", path: `/api/users/${me.id}`, cookie })).status, 400);
+    assert.equal((await httpJson(relay.adminPort, { method: "POST", path: `/api/users/${me.id}/role`, cookie, body: { role: "user" } })).status, 400, "no self-demotion");
+    const promoted = await httpJson(relay.adminPort, { method: "POST", path: `/api/users/${created.body.id}/role`, cookie, body: { role: "operator" } });
+    assert.equal(promoted.body.role, "operator");
+    assert.equal((await httpJson(relay.adminPort, { method: "POST", path: `/api/users/${created.body.id}/role`, cookie, body: { role: "root" } })).status, 400);
+    assert.equal((await httpJson(relay.adminPort, { method: "POST", path: `/api/users/${created.body.id}/role`, cookie, body: { role: "user" } })).body.role, "user");
+    const authStatus = await httpJson(relay.adminPort, { path: "/api/auth/status" });
+    assert.deepEqual(authStatus.body, { authenticated: false, oidc: false, passwordLogin: true });
 
     const invite = await httpJson(relay.adminPort, { method: "POST", path: "/api/invites", cookie, body: { note: "beta tester", expiresInDays: 7 } });
     assert.equal(invite.status, 201);

@@ -200,7 +200,9 @@
         <label for="login-password">Password</label>
         <input id="login-password" class="catppuccin-input" type="password" autocomplete="current-password" required>
       </div>
-      <button type="submit">Sign In</button>
+      <button type="submit" id="password-signin">Sign In</button>
+      <a id="sso-signin" class="hidden" href="/auth/login"
+        style="display: block; text-align: center; margin-top: 12px; padding: 10px; border-radius: 6px; background-color: var(--ctp-mauve); color: var(--ctp-crust); font-weight: 600; text-decoration: none;">Sign in with single sign-on</a>
       <div id="auth-error" class="auth-error"></div>
     </form>
   </div>
@@ -841,6 +843,7 @@
       }
       buttons.push(el('button', { type: 'button', class: 'small secondary', text: 'Tier', 'data-action': 'tier', 'data-user': user.id, 'data-tier': user.tier }));
       buttons.push(el('button', { type: 'button', class: 'small secondary', text: 'Password', 'data-action': 'password', 'data-user': user.id }));
+      buttons.push(el('button', { type: 'button', class: 'small secondary', text: user.role === 'operator' ? 'Make user' : 'Make operator', 'data-action': 'role', 'data-user': user.id, 'data-role': user.role === 'operator' ? 'user' : 'operator' }));
       buttons.push(el('button', { type: 'button', class: 'small danger', text: 'Delete', 'data-action': 'delete', 'data-user': user.id, 'data-username': user.username }));
       return el('div', { class: 'actions' }, buttons);
     }
@@ -978,6 +981,11 @@
           case 'unban':
             await postJson(`/api/users/${userId}/unban`, {});
             showToaster('User unbanned');
+            break;
+          case 'role':
+            if (!window.confirm(`Change this account's role to ${button.dataset.role}?`)) return;
+            await postJson(`/api/users/${userId}/role`, { role: button.dataset.role });
+            showToaster('Role updated');
             break;
           case 'activate':
             await postJson(`/api/users/${userId}/activate`, {});
@@ -1300,6 +1308,11 @@
         if (status.authenticated) {
           await start(status.username);
           return;
+        }
+        $('#sso-signin').classList.toggle('hidden', !status.oidc);
+        if (status.passwordLogin === false) {
+          for (const node of $$('#login-form .form-group, #password-signin')) node.classList.add('hidden');
+          for (const input of $$('#login-form input')) input.required = false;
         }
       } catch (_error) {
         // fall through to the login form

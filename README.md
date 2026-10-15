@@ -311,6 +311,8 @@ pending account directly.
 | `TURNSTILE_SECRET` | Require a Cloudflare Turnstile check to issue anonymous tokens. | unset | unset |
 | `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_JWKS_URL`, `JWT_USERNAME_CLAIM`, `JWT_DEFAULT_TIER` | External OIDC verification. | unset | unset |
 | `TRUSTED_PROXY_CIDRS`, `PEER_IP_HEADER` | Only believe `CLIENT_IP_HEADER` when the peer (socket address, or `PEER_IP_HEADER` such as `fly-client-ip`) is in these ranges, e.g. Cloudflare's. | unset | unset (warns when `TRUST_PROXY` is on) |
+| `ADMIN_OIDC_ISSUER`, `ADMIN_OIDC_CLIENT_ID`, `ADMIN_OIDC_CLIENT_SECRET`, `ADMIN_OIDC_REDIRECT_URL` | Operator single sign-on for the admin panel (OIDC code flow). The callback path comes from the redirect URL; an operator's account must have the provider identity as `external_sub` (`<iss>\|<sub>`). | unset | unset |
+| `ADMIN_OIDC_REQUIRE_MFA`, `ADMIN_PASSWORD_LOGIN` | Refuse SSO logins whose ID token lacks `amr: ["mfa"]`; keep the password form. | `true`, `true` | same |
 | `JWT_ALGORITHMS`, `JWT_VERIFIED_CLAIM` | Allowed JWT algorithms; claim that must be `true` before the email becomes the username. | `RS256`, unset | same |
 | `SIGNUP_MODE` | `open`, or `invite` to create new external accounts as pending until they redeem an invite code. | `open` | `open` |
 | `ALLOWED_ORIGINS` | Comma-separated browser origins allowed to open sessions and request anonymous tokens. | unset | unset (warns) |

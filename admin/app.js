@@ -11,6 +11,7 @@ const passport = require("passport");
 const LocalStrategy = require("passport-local").Strategy;
 const expressSession = require("express-session");
 const { validateRule } = require("./rules");
+const { createOidcLogin } = require("./oidc");
 const { publicUser } = require("../auth/users");
 
 async function bootstrapOperator({ users, config, log }) {
@@ -198,7 +199,10 @@ function createAdminApp({
       cookie: {
         httpOnly: true,
         secure: config.adminCookieSecure,
-        sameSite: "strict",
+        // Lax, not Strict: the OIDC callback is a top-level redirect from the
+        // provider and must carry the session holding the login state.
+        // Cross-site POSTs are refused by the Origin check below.
+        sameSite: "lax",
         maxAge: 8 * 60 * 60 * 1000,
       },
     }),
@@ -231,16 +235,24 @@ function createAdminApp({
     res.sendFile(adminHtmlPath);
   });
 
+  if (config.adminOidc) {
+    createOidcLogin({ ...config.adminOidc, users, log }).mount(app);
+  }
+
   app.get("/api/auth/status", (req, res) => {
     const authenticated = req.isAuthenticated && req.isAuthenticated();
     if (!authenticated) {
-      res.status(200).json({ authenticated: false });
+      res.status(200).json({ authenticated: false, oidc: Boolean(config.adminOidc), passwordLogin: config.adminPasswordLogin });
       return;
     }
     res.status(200).json({ authenticated: true, username: req.user.username });
   });
 
   app.post("/api/login", (req, res, next) => {
+    if (!config.adminPasswordLogin) {
+      res.status(403).json({ error: "Password sign-in is disabled; use single sign-on." });
+      return;
+    }
     const username = typeof req.body.username === "string" ? req.body.username.trim() : "";
     const password = typeof req.body.password === "string" ? req.body.password : "";
     if (!username || !password) {
@@ -489,6 +501,30 @@ function createAdminApp({
     }
     log?.info("invite revoked", { inviteId: id, by: req.user.username });
     res.sendStatus(204);
+  }));
+
+  app.post("/api/users/:id/role", asyncRoute(async (req, res) => {
+    const id = parseId(req.params.id);
+    const role = req.body && req.body.role;
+    if (!id || !(await users.findById(id))) {
+      res.sendStatus(404);
+      return;
+    }
+    if (id === req.user.id && role !== "operator") {
+      res.status(400).json({ error: "cannot remove your own operator role" });
+      return;
+    }
+    try {
+      await users.setRole(id, role);
+    } catch (error) {
+      if (error instanceof RangeError) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      throw error;
+    }
+    log?.info("user role changed", { userId: id, role, by: req.user.username });
+    res.status(200).json(publicUser(await users.findById(id)));
   }));
 
   app.post("/api/users/:id/tier", asyncRoute(async (req, res) => {

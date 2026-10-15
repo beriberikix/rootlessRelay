@@ -214,6 +214,18 @@ function resolveConfig(env = process.env) {
     adminBootstrapUsername: env.ADMIN_BOOTSTRAP_USERNAME || null,
     adminBootstrapPassword: env.ADMIN_BOOTSTRAP_PASSWORD || null,
     adminTrustProxy: parseBool(env.ADMIN_TRUST_PROXY, trustProxy),
+    // Operator sign-in through OIDC (all four required to enable it), and
+    // whether the username/password form stays available.
+    adminOidc: env.ADMIN_OIDC_ISSUER && env.ADMIN_OIDC_CLIENT_ID && env.ADMIN_OIDC_CLIENT_SECRET && env.ADMIN_OIDC_REDIRECT_URL
+      ? {
+        issuer: env.ADMIN_OIDC_ISSUER,
+        clientId: env.ADMIN_OIDC_CLIENT_ID,
+        clientSecret: env.ADMIN_OIDC_CLIENT_SECRET,
+        redirectUrl: env.ADMIN_OIDC_REDIRECT_URL,
+        requireMfa: parseBool(env.ADMIN_OIDC_REQUIRE_MFA, true),
+      }
+      : null,
+    adminPasswordLogin: parseBool(env.ADMIN_PASSWORD_LOGIN, true),
     adminCookieSecure: parseBool(env.ADMIN_COOKIE_SECURE, false),
     adminLoginWindowMs: parseInteger(env.ADMIN_LOGIN_WINDOW_MS, 10 * 60 * 1000, {
       name: "ADMIN_LOGIN_WINDOW_MS",
