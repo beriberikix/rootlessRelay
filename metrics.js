@@ -7,7 +7,36 @@ function noopInstrument() {
   return { inc() {}, dec() {}, set() {}, observe() {}, labels() { return this; } };
 }
 
-function createMetrics({ enabled = true, promClient = null } = {}) {
+// Appends the exposition text served at each of `mergeUrls` (for example a
+// sidecar's local metrics endpoint, so a platform that scrapes one endpoint
+// per app sees both). Families the relay already exports are skipped, and an
+// unreachable URL is left out rather than failing the scrape.
+async function fetchMerged(urls, ownText, { fetch, timeoutMs }) {
+  const own = new Set(ownText.match(/^# TYPE \S+/gm)?.map((line) => line.slice(7)) || []);
+  const parts = await Promise.all(urls.map(async (url) => {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+      return res.ok ? await res.text() : "";
+    } catch {
+      return "";
+    }
+  }));
+  return parts
+    .flatMap((text) => text.split("\n"))
+    .filter((line) => {
+      const name = line.startsWith("# ") ? line.split(" ")[2] : line.split(/[{\s]/)[0];
+      return line && ![...own].some((family) => name === family || name?.startsWith(family + "_"));
+    })
+    .join("\n");
+}
+
+function createMetrics({
+  enabled = true,
+  promClient = null,
+  mergeUrls = [],
+  fetch = globalThis.fetch,
+  mergeTimeoutMs = 2000,
+} = {}) {
   if (!enabled) {
     return {
       enabled: false,
@@ -81,7 +110,12 @@ function createMetrics({ enabled = true, promClient = null } = {}) {
     enabled: true,
     registry,
     contentType: registry.contentType,
-    render: () => registry.metrics(),
+    async render() {
+      const text = await registry.metrics();
+      if (mergeUrls.length === 0) return text;
+      const merged = await fetchMerged(mergeUrls, text, { fetch, timeoutMs: mergeTimeoutMs });
+      return merged ? `${text.trimEnd()}\n${merged}\n` : text;
+    },
     sessionsGauge,
     bytesCounter,
     egressDenied,

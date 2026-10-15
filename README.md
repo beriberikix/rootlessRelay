@@ -273,6 +273,9 @@ and tiers, browse the connection audit log and view per-account usage.
 scraper presenting `Authorization: Bearer $METRICS_TOKEN`. Set
 `METRICS_PUBLIC=true` to let an unauthenticated scraper read it when the
 admin port is only reachable over a private network.
+`METRICS_MERGE_URLS` (comma-separated) appends other local endpoints' metrics
+to the same response, for platforms that scrape one endpoint per app (for
+example Litestream's `http://127.0.0.1:9090/metrics`).
 
 ### Account API
 
@@ -328,6 +331,7 @@ pending account directly.
 | `AUDIT_ENABLED`, `AUDIT_RETENTION_DAYS` | Connection audit log and its retention. | `false`, `30` | `true`, `30` |
 | `USAGE_FLUSH_INTERVAL_MS` | How often byte counters are persisted. | `30000` | same |
 | `METRICS_ENABLED`, `METRICS_TOKEN`, `METRICS_PUBLIC` | Prometheus endpoint, an optional scrape token, and whether to serve it without auth. | `false` | `true`, unset, `false` |
+| `METRICS_MERGE_URLS` | Comma-separated local metrics endpoints appended to `/metrics`; families the relay already exports and unreachable URLs are skipped. | unset | unset |
 | `LOG_JSON` | JSON-lines logs for the hosted modules. | `false` | `true` |
 | `ADMIN_AUTH_DB_PATH` | SQLite database (accounts, tokens, usage, audit, admin sessions). | `./admin_auth.sqlite` | `/data/admin_auth.sqlite` in Docker |
 | `ADMIN_SESSION_SECRET`, `ADMIN_BOOTSTRAP_USERNAME`, `ADMIN_BOOTSTRAP_PASSWORD`, `ADMIN_TRUST_PROXY`, `ADMIN_COOKIE_SECURE` | Operator login. The bootstrap pair creates the first operator when none exists. | | secret required |

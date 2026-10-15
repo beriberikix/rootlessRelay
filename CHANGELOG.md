@@ -70,6 +70,8 @@
   separately from `ALLOWED_ORIGINS` (which it defaults to); `*` allows any,
   so third-party pages can embed the relay with a user's token while the
   HTTP APIs stay limited to the operator's own frontend.
+- `METRICS_MERGE_URLS` appends other local metrics endpoints (such as
+  Litestream's) to `/metrics`, for platforms that scrape one endpoint per app.
 
 ### Changed
 

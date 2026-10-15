@@ -82,7 +82,7 @@ function init(ctx) {
     connectionsPerIP: ctx.connectionsPerIP,
   };
 
-  const metrics = createMetrics({ enabled: config.metricsEnabled });
+  const metrics = createMetrics({ enabled: config.metricsEnabled, mergeUrls: config.metricsMergeUrls });
   const auditRef = { current: noopAudit() };
   const usageRef = { current: noopUsage() };
   const audit = forwarder(auditRef, ["record", "finish", "flush", "prune", "query", "pendingCount", "close"]);
