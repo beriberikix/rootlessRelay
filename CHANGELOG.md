@@ -71,6 +71,13 @@
   so third-party pages can embed the relay with a user's token while the
   HTTP APIs stay limited to the operator's own frontend.
 
+### Changed
+
+- TCP toward the VM uses slow start below ssthresh (RFC 5681, with RFC 3465
+  byte counting) instead of always growing by about one segment per round
+  trip. With a large `TCP_WINDOW_SIZE` and a distant client, a 1 MB download
+  over 100 ms of round-trip time drops from 3.5 s to 2.0 s. Offered upstream.
+
 ### Security (fork)
 
 Fixes from a review of the hosted code paths:
