@@ -469,10 +469,14 @@ class VMSession {
 
     const mss = this.tcpMss(conn);
     const current = Math.max(mss, conn.congestionWindow || mss);
-    const increment = Math.max(
-      1,
-      Math.floor((mss * ackedDataBytes) / current),
-    );
+    // Slow start below ssthresh (RFC 5681 3.1): grow by the bytes acked, at
+    // most two segments per ACK (RFC 3465 appropriate byte counting with
+    // L = 2*SMSS, which keeps delayed ACKs from halving the growth). Above
+    // it, congestion avoidance adds about one segment per round trip.
+    const slowStart = current < (conn.congestionThreshold || TCP_WINDOW_SIZE);
+    const increment = slowStart
+      ? Math.min(ackedDataBytes, 2 * mss)
+      : Math.max(1, Math.floor((mss * ackedDataBytes) / current));
     conn.congestionWindow = Math.min(TCP_WINDOW_SIZE, current + increment);
     conn.pacer?.noteAck(ackedDataBytes, conn.congestionWindow);
   }
