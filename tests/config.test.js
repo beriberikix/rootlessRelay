@@ -64,6 +64,19 @@ test("env overrides win over mode defaults", () => {
   ]);
   assert.equal(config.trustProxyHops, 2);
   assert.deepEqual(config.tiersJson, { anon: { maxSessionMs: 60000 } });
+  assert.deepEqual(config.sessionAllowedOrigins, config.allowedOrigins, "sessions default to ALLOWED_ORIGINS");
+});
+
+test("SESSION_ALLOWED_ORIGINS overrides the session origin list; * allows any", () => {
+  const base = { ALLOWED_ORIGINS: "https://app.example.com" };
+  assert.equal(resolveConfig({ ...base, SESSION_ALLOWED_ORIGINS: "*" }).sessionAllowedOrigins, null);
+  assert.deepEqual(
+    resolveConfig({ ...base, SESSION_ALLOWED_ORIGINS: "https://a.example, https://b.example" }).sessionAllowedOrigins,
+    ["https://a.example", "https://b.example"],
+  );
+  const open = resolveConfig({ SESSION_ALLOWED_ORIGINS: "*", ALLOWED_ORIGINS: "https://app.example.com" });
+  assert.deepEqual(open.allowedOrigins, ["https://app.example.com"], "the API list is unchanged");
+  assert.equal(resolveConfig({}).sessionAllowedOrigins, null);
 });
 
 test("hosted mode refuses unsafe settings", () => {

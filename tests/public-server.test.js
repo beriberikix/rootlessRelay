@@ -134,6 +134,27 @@ test("hosted mode: credential required, authenticator errors map to HTTP statuse
   }
 });
 
+test("SESSION_ALLOWED_ORIGINS=* opens sessions to any origin while the API list still applies", async () => {
+  const { server, port } = await startServer({
+    env: { ALLOWED_ORIGINS: "https://app.example.com", SESSION_ALLOWED_ORIGINS: "*" },
+    handleAnonToken: async () => ({ token: "t" }),
+  });
+  try {
+    const embedded = await connect(port, { headers: { Origin: "https://someone-else.example" } });
+    assert.equal(embedded.status, 101);
+    embedded.ws.close();
+    const denied = await request(port, {
+      method: "POST",
+      path: "/api/anon/token",
+      headers: { Origin: "https://someone-else.example", "Content-Type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(denied.status, 403);
+  } finally {
+    await server.close();
+  }
+});
+
 test("origin allow list applies to upgrades and the anon token endpoint; CORS headers are emitted", async () => {
   const { server, port } = await startServer({
     env: { ALLOWED_ORIGINS: "https://app.example.com" },

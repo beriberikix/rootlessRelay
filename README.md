@@ -279,7 +279,7 @@ admin port is only reachable over a private network.
 Signed-in users manage their own account on the public listener under
 `/api/me`, authenticated with `Authorization: Bearer <token>` where the token
 is an external JWT or one of their API tokens. Anonymous tokens are refused.
-Browser origins must be in `ALLOWED_ORIGINS`; CORS headers are emitted.
+Browser origins must be in `ALLOWED_ORIGINS` (sessions: `SESSION_ALLOWED_ORIGINS`, `*` for any); CORS headers are emitted.
 
 | Route | Purpose |
 |---|---|
@@ -315,7 +315,8 @@ pending account directly.
 | `ADMIN_OIDC_REQUIRE_MFA`, `ADMIN_PASSWORD_LOGIN` | Refuse SSO logins whose ID token lacks `amr: ["mfa"]`; keep the password form. | `true`, `true` | same |
 | `JWT_ALGORITHMS`, `JWT_VERIFIED_CLAIM` | Allowed JWT algorithms; claim that must be `true` before the email becomes the username. | `RS256`, unset | same |
 | `SIGNUP_MODE` | `open`, or `invite` to create new external accounts as pending until they redeem an invite code. | `open` | `open` |
-| `ALLOWED_ORIGINS` | Comma-separated browser origins allowed to open sessions and request anonymous tokens. | unset | unset (warns) |
+| `ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call the HTTP APIs (`/api/me`, anonymous tokens) and, unless `SESSION_ALLOWED_ORIGINS` is set, to open sessions. | unset | unset (warns) |
+| `SESSION_ALLOWED_ORIGINS` | Browser origins allowed to open sessions; `*` for any. Safe to open up because sessions authenticate with a token, not a cookie. | `ALLOWED_ORIGINS` | `ALLOWED_ORIGINS` |
 | `ALLOW_QUERY_TOKEN` | Accept `?token=` on the upgrade URL (leaks into logs). | `false` | `false` |
 | `EGRESS_POLICY`, `EGRESS_DENY_CIDRS`, `EGRESS_ALLOW_CIDRS`, `EGRESS_DENY_PORTS` | Outbound destination policy. Allow-listed CIDRs are exceptions to the deny list. | `open` | `hosted`, deny port 25 |
 | `ANTI_SPOOF` | Lock each session to its first source IP and MAC. | `true` | `true` |

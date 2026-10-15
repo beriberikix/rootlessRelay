@@ -141,6 +141,7 @@ function createPublicServer({
   userApi = null,
 }) {
   const allowedOrigins = config.allowedOrigins ? new Set(config.allowedOrigins) : null;
+  const sessionOrigins = config.sessionAllowedOrigins ? new Set(config.sessionAllowedOrigins) : null;
 
   function originAllowed(origin) {
     if (!allowedOrigins) return true;
@@ -251,7 +252,7 @@ function createPublicServer({
         return;
       }
       const clientIP = resolveClientIP(req, config.clientIpOptions);
-      if (req.headers.origin && !originAllowed(req.headers.origin)) {
+      if (req.headers.origin && sessionOrigins && !sessionOrigins.has(req.headers.origin)) {
         log?.warn("upgrade rejected: origin", { clientIP, origin: req.headers.origin });
         rejectUpgrade(socket, 403, "origin not allowed");
         return;

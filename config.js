@@ -80,6 +80,12 @@ function parseJson(value, name) {
   }
 }
 
+function parseSessionOrigins(sessionValue, allowedValue) {
+  const value = sessionValue === undefined || sessionValue === "" ? allowedValue : sessionValue;
+  if (!value || value.trim() === "*") return null;
+  return parseList(value);
+}
+
 function resolveConfig(env = process.env) {
   const mode = env.RELAY_MODE || "local";
   if (!MODES.includes(mode)) {
@@ -149,6 +155,11 @@ function resolveConfig(env = process.env) {
       : null,
 
     allowedOrigins: env.ALLOWED_ORIGINS ? parseList(env.ALLOWED_ORIGINS) : null,
+    // Origins allowed to open relay sessions (WebSocket upgrades). Defaults
+    // to ALLOWED_ORIGINS; "*" allows any origin. Sessions authenticate with a
+    // token, never a cookie, so a cross-site page cannot ride on a visitor's
+    // credentials; ALLOWED_ORIGINS keeps guarding the HTTP APIs.
+    sessionAllowedOrigins: parseSessionOrigins(env.SESSION_ALLOWED_ORIGINS, env.ALLOWED_ORIGINS),
     allowQueryToken: parseBool(env.ALLOW_QUERY_TOKEN, false),
 
     egressPolicy,
@@ -264,7 +275,7 @@ function resolveConfig(env = process.env) {
     }
     if (!config.allowedOrigins) {
       warnings.push(
-        "ALLOWED_ORIGINS is not set; browser clients from any origin can open sessions",
+        "ALLOWED_ORIGINS is not set; browser clients from any origin can use the HTTP APIs",
       );
     }
     const logLevel = env.LOG_LEVEL === undefined ? 1 : Number.parseInt(env.LOG_LEVEL, 10);

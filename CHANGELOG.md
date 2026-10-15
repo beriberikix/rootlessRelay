@@ -66,6 +66,10 @@
   whose external identity matches, and by default only with MFA (`amr`).
   `ADMIN_PASSWORD_LOGIN=false` turns the password form off.
   `POST /api/users/:id/role` and a panel button promote or demote operators.
+- `SESSION_ALLOWED_ORIGINS` sets which browser origins may open sessions,
+  separately from `ALLOWED_ORIGINS` (which it defaults to); `*` allows any,
+  so third-party pages can embed the relay with a user's token while the
+  HTTP APIs stay limited to the operator's own frontend.
 
 ### Security (fork)
 
