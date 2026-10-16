@@ -73,6 +73,13 @@
 - `METRICS_MERGE_URLS` appends other local metrics endpoints (such as
   Litestream's) to `/metrics`, for platforms that scrape one endpoint per app.
 
+- Traffic between sessions of one account is shaped instead of policed: over
+  the receiver's download budget it waits in a short per-session queue (at
+  most 256 KiB) and leaves at the tier's rate, and the sender's upload limit
+  no longer applies to it. TCP between sessions no longer collapses when a
+  sender bursts past the limit (about 4x faster in a local test with
+  unpaced senders).
+
 ### Changed
 
 - TCP toward the VM uses slow start below ssthresh (RFC 5681, with RFC 3465

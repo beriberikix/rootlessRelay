@@ -21,6 +21,15 @@ const AUDIT_WINDOW_MS = 60000;
 const DENY_AUDIT_PER_WINDOW = 30;
 const ALLOW_AUDIT_PER_WINDOW = 600;
 const DENIED_KEYS_MAX = 1024;
+// Traffic between sessions of one owner is shaped rather than policed: it
+// waits in a short per-session queue and leaves at the download rate, so
+// TCP between sessions sees delay instead of bursts of loss, which made it
+// collapse to a fraction of the limit. The queue is capped at about a
+// quarter second of traffic; beyond that packets are dropped as before.
+const PEER_BURST_BYTES = 64 * 1024;
+const PEER_QUEUE_MAX_BYTES = 256 * 1024;
+const PEER_DRAIN_MIN_MS = 2;
+const PEER_DRAIN_MAX_MS = 50;
 
 function unlimitedLimiter() {
   return { tryConsume: () => true, get usage() { return 0; } };
@@ -48,6 +57,45 @@ function buildTcpReset({ srcIP, srcPort, dstIP, dstPort, seq = 0, ack = 0 }) {
   return packet;
 }
 
+// Token bucket pacing the peer queue; the session's sliding-window limiter
+// still accounts for every byte.
+class TokenBucket {
+  constructor(rate, burst, now) {
+    this.rate = rate;
+    this.burst = burst;
+    this.now = now;
+    this.tokens = burst;
+    this.last = now();
+  }
+
+  refill() {
+    const t = this.now();
+    this.tokens = Math.min(this.burst, this.tokens + ((t - this.last) * this.rate) / 1000);
+    this.last = t;
+  }
+
+  // Packets larger than the burst pass once the bucket is full.
+  has(bytes) {
+    this.refill();
+    return this.tokens >= Math.min(bytes, this.burst);
+  }
+
+  consume(bytes) {
+    this.tokens -= bytes;
+  }
+
+  msUntil(bytes) {
+    this.refill();
+    const need = Math.min(bytes, this.burst) - this.tokens;
+    return need <= 0 ? 0 : (need * 1000) / this.rate;
+  }
+}
+
+function ipv4ToInt(ip) {
+  if (typeof ip !== "string") return -1;
+  return ip.split(".").reduce((n, octet) => n * 256 + Number(octet), 0);
+}
+
 function isLive(session) {
   return Boolean(session && session.ws && session.ws.readyState === WS_OPEN);
 }
@@ -63,6 +111,8 @@ class SessionPolicy {
     metrics = null,
     log = null,
     now = Date.now,
+    setTimer = setTimeout,
+    clearTimer = clearTimeout,
   }) {
     this.tier = tier;
     this.identity = identity;
@@ -73,6 +123,15 @@ class SessionPolicy {
     this.metrics = metrics;
     this.log = log;
     this.now = now;
+    this.setTimer = setTimer;
+    this.clearTimer = clearTimer;
+
+    this.peerPacer = tier.downloadBps === null ? null : new TokenBucket(tier.downloadBps, PEER_BURST_BYTES, now);
+    this.gatewayInt = ipv4ToInt(ctx && ctx.GATEWAY_IP);
+    this.peerQueue = [];
+    this.peerQueueBytes = 0;
+    this.peerTimer = null;
+    this.peerReleasing = false;
 
     this.uploadLimiter = tier.uploadBps === null ? null : new SlidingWindowRateLimiter(tier.uploadBps, 1000, now);
     this.synLimiter = makeLimiter(tier.synPerSec, now);
@@ -89,6 +148,7 @@ class SessionPolicy {
       macDrops: 0,
       uploadDrops: 0,
       downloadDrops: 0,
+      peerQueued: 0,
       egressDenied: 0,
       synRateDrops: 0,
       connCapDenied: 0,
@@ -153,6 +213,10 @@ class SessionPolicy {
 
     if (!this.uploadLimiter) return true;
     if (srcIP === "0.0.0.0" || protocol === 1 || dstIP === this.ctx.GATEWAY_IP) return true;
+    // Traffic to another session of this owner is shaped at the receiver
+    // (admitDownload); policing it here as well would drop it first.
+    const peer = this.ctx.ipToSession.get(dstIP);
+    if (peer && this.canReach(session, peer)) return true;
     const headerLength = parsed.headerLength;
     let bytes = 0;
     if (protocol === 6) {
@@ -294,6 +358,7 @@ class SessionPolicy {
   // H13: everything the relay sends to the VM except internet TCP (which
   // drainTCPToVM already paces) and DHCP replies shares the download budget.
   admitDownload(session, ipPacket) {
+    if (this.peerReleasing) return true; // budget already taken by releasePeerQueue
     if (!session.rateLimiter) return true;
     const protocol = ipPacket[9];
     const headerLength = (ipPacket[0] & 0x0f) * 4;
@@ -305,9 +370,71 @@ class SessionPolicy {
       ipPacket.readUInt16BE(headerLength) === DHCP_SERVER_PORT) {
       return true;
     }
+    if (srcInPool && this.peerPacer && ipPacket.readUInt32BE(12) !== this.gatewayInt) {
+      return this.shapePeerPacket(session, ipPacket);
+    }
     if (session.rateLimiter.tryConsume(ipPacket.length)) return true;
     this.counters.downloadDrops += 1;
     return false;
+  }
+
+  // Sends a packet from another session now if the pacer and the download
+  // budget allow and nothing is queued ahead of it; otherwise queues it.
+  // Returns true when relay.js should send it immediately.
+  shapePeerPacket(session, ipPacket) {
+    if (this.peerQueue.length === 0 && this.takePeerBudget(session, ipPacket.length)) return true;
+    if (this.peerQueueBytes + ipPacket.length > PEER_QUEUE_MAX_BYTES) {
+      this.counters.downloadDrops += 1;
+      return false;
+    }
+    this.peerQueue.push(ipPacket);
+    this.peerQueueBytes += ipPacket.length;
+    this.counters.peerQueued += 1;
+    this.schedulePeerRelease(session);
+    return false;
+  }
+
+  takePeerBudget(session, bytes) {
+    if (!this.peerPacer.has(bytes)) return false;
+    if (!session.rateLimiter.tryConsume(bytes)) return false;
+    this.peerPacer.consume(bytes);
+    return true;
+  }
+
+  schedulePeerRelease(session) {
+    if (this.peerTimer || this.peerQueue.length === 0) return;
+    const wait = this.peerPacer.msUntil(this.peerQueue[0].length);
+    const delay = Math.min(PEER_DRAIN_MAX_MS, Math.max(PEER_DRAIN_MIN_MS, Math.ceil(wait)));
+    this.peerTimer = this.setTimer(() => {
+      this.peerTimer = null;
+      this.releasePeerQueue(session);
+    }, delay);
+  }
+
+  // Sends queued packets in order while budget allows, then reschedules.
+  releasePeerQueue(session) {
+    if (!isLive(session)) {
+      this.clearPeerQueue();
+      return;
+    }
+    while (this.peerQueue.length > 0 && this.takePeerBudget(session, this.peerQueue[0].length)) {
+      const packet = this.peerQueue.shift();
+      this.peerQueueBytes -= packet.length;
+      this.peerReleasing = true;
+      try {
+        session.sendIPToVM(packet);
+      } finally {
+        this.peerReleasing = false;
+      }
+    }
+    this.schedulePeerRelease(session);
+  }
+
+  clearPeerQueue() {
+    if (this.peerTimer) this.clearTimer(this.peerTimer);
+    this.peerTimer = null;
+    this.peerQueue = [];
+    this.peerQueueBytes = 0;
   }
 
   // Called periodically by the connection handler: abort real sockets that
@@ -334,6 +461,7 @@ class SessionPolicy {
   }
 
   onSessionClose(session) {
+    this.clearPeerQueue();
     const endedAt = this.now();
     for (const connKey of this.pendingConnects.keys()) {
       const conn = session.tcpConnections.get(connKey);

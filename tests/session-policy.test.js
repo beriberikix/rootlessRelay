@@ -55,6 +55,8 @@ function makePolicy({
   antiSpoof = true,
   audit = null,
   tiers = TIERS,
+  setTimer,
+  clearTimer,
 } = {}) {
   const policy = new SessionPolicy({
     tier: tiers[tier],
@@ -64,6 +66,7 @@ function makePolicy({
     antiSpoof,
     audit,
     now,
+    ...(setTimer ? { setTimer, clearTimer } : {}),
   });
   return policy;
 }
@@ -278,8 +281,11 @@ test("admitDownload skips internet TCP and DHCP replies but budgets UDP and VM-t
   assert.equal(policy.admitDownload(session, udpReply), true);
   assert.equal(policy.admitDownload(session, udpReply), false);
   assert.equal(policy.counters.downloadDrops, 1);
+  // Over budget, VM-to-VM traffic waits in the peer queue instead.
   const vmToVm = tcpPacket({ srcIP: "10.0.2.16", dstIP: "10.0.2.15", payload: Buffer.alloc(10) });
   assert.equal(policy.admitDownload(session, vmToVm), false);
+  assert.equal(policy.peerQueue.length, 1);
+  policy.clearPeerQueue();
   // Unlimited tiers install a pass-through limiter.
   const local = attach(makePolicy({ tier: "local", tiers: resolveTiers({ local: { downloadBps: null } }, {
     rateLimitBps: 1024, dnsServerIp: "8.8.8.8", maxUdpFlows: 8, maxConnectionsPerIp: 2, enableVmToVm: true,
@@ -356,4 +362,117 @@ test("a flood of denied destinations is summarised, not stored row by row", () =
   const summary = rows.find((row) => row.proto === "summary");
   assert.equal(summary.verdict, "suppressed:deny=49970:allow=0");
   assert.equal(rows.at(-1).verdict.startsWith("deny"), true, "a new window allows rows again");
+});
+
+function fakeTimers() {
+  const timers = [];
+  return {
+    timers,
+    setTimer(fn, ms) { const t = { fn, ms }; timers.push(t); return t; },
+    clearTimer(t) { const i = timers.indexOf(t); if (i >= 0) timers.splice(i, 1); },
+    runNext() { const t = timers.shift(); if (t) t.fn(); return t; },
+  };
+}
+
+const SHAPING_TIERS = resolveTiers({ user: { downloadBps: 10000 } }, {
+  rateLimitBps: 1024, dnsServerIp: "8.8.8.8", maxUdpFlows: 8, maxConnectionsPerIp: 2, enableVmToVm: true,
+});
+
+function peerPacket(i, size = 1500) {
+  const payload = Buffer.alloc(size - 28);
+  payload.writeUInt32BE(i, 0);
+  return udpPacket({ srcIP: "10.0.2.16", dstIP: "10.0.2.15", srcPort: 5000, dstPort: 6000, payload });
+}
+
+test("VM-to-VM traffic over the download budget is queued and released in order", () => {
+  let t = 0;
+  const timers = fakeTimers();
+  const policy = makePolicy({ tier: "user", owner: "user:1", now: () => t, tiers: SHAPING_TIERS, ...timers });
+  const session = attach(policy, fakeSession());
+  session.sendIPToVM = function (packet) {
+    // relay.js runs admitDownload again on the way out; released packets pass.
+    assert.equal(policy.admitDownload(this, packet), true);
+    this.sent.push(packet.readUInt32BE(28));
+  };
+
+  const immediate = [];
+  for (let i = 0; i < 20; i += 1) {
+    if (policy.admitDownload(session, peerPacket(i))) immediate.push(i);
+  }
+  assert.deepEqual(immediate, [0, 1, 2, 3, 4, 5]); // 9000 of 10000 bytes per second
+  assert.equal(policy.peerQueue.length, 14);
+  assert.equal(policy.counters.downloadDrops, 0);
+  assert.equal(timers.timers.length, 1);
+
+  // Nothing frees up until the sliding window moves past the first packets.
+  t = 500;
+  timers.runNext();
+  assert.deepEqual(session.sent, []);
+  t = 1001;
+  while (timers.timers.length && session.sent.length < 6) timers.runNext();
+  assert.deepEqual(session.sent, [6, 7, 8, 9, 10, 11]);
+
+  // A new packet queues behind the backlog rather than jumping it.
+  t = 2002;
+  assert.equal(policy.admitDownload(session, peerPacket(99)), false);
+  while (timers.timers.length && session.sent.length < 12) timers.runNext();
+  assert.deepEqual(session.sent.slice(6), [12, 13, 14, 15, 16, 17]);
+  assert.equal(policy.peerQueue.at(-1).readUInt32BE(28), 99);
+});
+
+test("the peer queue is bounded, and cleared when the session closes or goes away", () => {
+  const timers = fakeTimers();
+  const policy = makePolicy({ tier: "user", owner: "user:1", now: () => 0, tiers: SHAPING_TIERS, ...timers });
+  const session = attach(policy, fakeSession());
+  let queued = 0;
+  for (let i = 0; i < 400; i += 1) if (!policy.admitDownload(session, peerPacket(i))) queued += 1;
+  assert.ok(policy.peerQueueBytes <= 256 * 1024);
+  assert.equal(policy.counters.downloadDrops, queued - policy.peerQueue.length);
+  assert.ok(policy.counters.downloadDrops > 0);
+
+  policy.onSessionClose(session);
+  assert.equal(policy.peerQueue.length, 0);
+  assert.equal(timers.timers.length, 0);
+
+  for (let i = 0; i < 10; i += 1) policy.admitDownload(session, peerPacket(i));
+  session.ws.readyState = 3;
+  timers.runNext();
+  assert.equal(policy.peerQueue.length, 0);
+  assert.deepEqual(session.sent, []);
+});
+
+test("gateway traffic and unlimited tiers are not shaped", () => {
+  const timers = fakeTimers();
+  const policy = makePolicy({ tier: "user", owner: "user:1", now: () => 0, tiers: SHAPING_TIERS, ...timers });
+  const session = attach(policy, fakeSession());
+  const fromGateway = udpPacket({ srcIP: GATEWAY_IP, dstIP: "10.0.2.15", srcPort: 8080, dstPort: 6000, payload: Buffer.alloc(9000) });
+  assert.equal(policy.admitDownload(session, fromGateway), true);
+  assert.equal(policy.admitDownload(session, fromGateway), false);
+  assert.equal(policy.peerQueue.length, 0);
+
+  const local = makePolicy({ tier: "local", ...timers, tiers: resolveTiers({ local: { downloadBps: null } }, {
+    rateLimitBps: 1024, dnsServerIp: "8.8.8.8", maxUdpFlows: 8, maxConnectionsPerIp: 2, enableVmToVm: true,
+  }) });
+  const localSession = attach(local, fakeSession());
+  for (let i = 0; i < 50; i += 1) assert.equal(local.admitDownload(localSession, peerPacket(i)), true);
+});
+
+test("upload policing skips traffic to a reachable session of the same owner", () => {
+  const ctx = makeCtx();
+  const tiers = resolveTiers({ user: { uploadBps: 100 } }, {
+    rateLimitBps: 1024, dnsServerIp: "8.8.8.8", maxUdpFlows: 8, maxConnectionsPerIp: 2, enableVmToVm: true,
+  });
+  const sender = attach(makePolicy({ tier: "user", owner: "user:1", ctx, now: () => 0, tiers }), fakeSession("a"));
+  const peer = attach(makePolicy({ tier: "user", owner: "user:1", ctx, now: () => 0, tiers }), fakeSession("b"));
+  const stranger = attach(makePolicy({ tier: "user", owner: "user:2", ctx, now: () => 0, tiers }), fakeSession("c"));
+  sender.vmIP = "10.0.2.15";
+  ctx.ipToSession.set("10.0.2.15", sender);
+  ctx.ipToSession.set("10.0.2.16", peer);
+  ctx.ipToSession.set("10.0.2.17", stranger);
+
+  const toPeer = udpPacket({ srcIP: "10.0.2.15", dstIP: "10.0.2.16", dstPort: 6000, payload: Buffer.alloc(500) });
+  for (let i = 0; i < 5; i += 1) assert.equal(admit(sender.policy, sender, toPeer), true);
+  const toStranger = udpPacket({ srcIP: "10.0.2.15", dstIP: "10.0.2.17", dstPort: 6000, payload: Buffer.alloc(500) });
+  assert.equal(admit(sender.policy, sender, toStranger), false);
+  assert.equal(sender.policy.counters.uploadDrops, 1);
 });
