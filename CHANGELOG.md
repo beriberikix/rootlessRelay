@@ -79,6 +79,24 @@
   no longer applies to it. TCP between sessions no longer collapses when a
   sender bursts past the limit (about 4x faster in a local test with
   unpaced senders).
+- A session's address is held for its owner for `ADDRESS_HOLD_MS` (60 s in
+  hosted mode, off in local mode) after it closes. A client that reconnects
+  in time gets the same address back, by DHCP with the same MAC or by
+  sending from it; other owners cannot take it, and a full pool evicts the
+  oldest hold. Connections between an owner's sessions are routed as raw IP,
+  so they survive the gap.
+- A TCP segment from the VM for a connection the relay does not know is
+  answered with a reset (RFC 9293) instead of being dropped, so a client
+  that reconnected while its stack still had connections open sees them
+  fail at once instead of retransmitting for minutes. Segments toward an
+  address held for the same owner are still dropped silently.
+- A new session of an owner takes over the MAC and address of the owner's
+  live session that has sent nothing for 5 s, and terminates it. After a
+  sleep or a network change the old socket could look open for up to a
+  minute, and its MAC lock dropped every frame of the reconnected client.
+- The session idle timeout counts only Ethernet frames; `ping:` text
+  messages no longer reset it, so a client heartbeat cannot keep a forgotten
+  session open.
 
 ### Changed
 

@@ -12,6 +12,7 @@ const { createLogger } = require("./log");
 const { createEgressPolicy } = require("./policy/egress");
 const { resolveTiers } = require("./policy/tiers");
 const { createPolicyFactory } = require("./policy/session_policy");
+const { createAddressHolds } = require("./policy/address_holds");
 const { AuthError, createPublicServer } = require("./server/public");
 const { createUserApi } = require("./server/user_api");
 const { attachConnectionHandler, createSessionRegistry } = require("./server/connection");
@@ -81,6 +82,7 @@ function init(ctx) {
     activeSessions: ctx.activeSessions,
     connectionsPerIP: ctx.connectionsPerIP,
   };
+  policyCtx.addressHolds = createAddressHolds({ ctx: policyCtx, holdMs: config.addressHoldMs, log });
 
   const metrics = createMetrics({ enabled: config.metricsEnabled, mergeUrls: config.metricsMergeUrls });
   const auditRef = { current: noopAudit() };
@@ -336,6 +338,7 @@ function init(ctx) {
     tiers,
     egress,
     registry,
+    addressHolds: policyCtx.addressHolds,
     policyFactory,
     lifecycle,
     metrics,

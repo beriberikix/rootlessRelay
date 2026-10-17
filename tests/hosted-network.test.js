@@ -260,6 +260,132 @@ test("tenant isolation: anon sessions cannot see each other; one account's sessi
   }
 });
 
+test("reconnect: the address is held for the owner, and stale TCP segments are reset", NETWORK, async () => {
+  const relay = await startRelay({ hosted: true, env: { ENABLE_VM_TO_VM: "true", ADDRESS_HOLD_MS: "1500" } });
+  try {
+    const cookie = await relay.adminCookie();
+    const created = await httpJson(relay.adminPort, {
+      method: "POST", path: "/api/users", cookie, body: { username: "roamer", password: "roamer-password" },
+    });
+    assert.equal(created.status, 201, created.text);
+    const tokenRes = await httpJson(relay.adminPort, {
+      method: "POST", path: `/api/users/${created.body.id}/tokens`, cookie, body: { name: "t" },
+    });
+    const token = tokenRes.body.token;
+    const macA = macFromNumber(20);
+    const macB = macFromNumber(21);
+
+    const a = await openWebSocket(relay.wsPort, { token });
+    const b = await openWebSocket(relay.wsPort, { token });
+    const framesB = new FrameQueue(b.ws);
+    const first = await bringUp(relay, a.ws, macA, cookie);
+    const sessionB = await bringUp(relay, b.ws, macB, cookie);
+    a.ws.close();
+    await delay(100);
+
+    // While A is away, B's segments toward it are dropped, not reset.
+    const toA = {
+      vmMAC: macB, srcIP: sessionB.vmIP, dstIP: first.vmIP, srcPort: 40400, dstPort: 3240,
+      seq: 7, ack: 9, flags: { ack: true },
+    };
+    b.ws.send(buildTCPFrame(toA));
+    assert.equal(
+      await framesB.expectNone((f) => f.kind === "tcp" && f.dstPort === 40400, 300),
+      true,
+      "no reset toward a held address",
+    );
+
+    // Another account cannot take the held address.
+    const stranger = await openWebSocket(relay.wsPort, { token: await anonToken(relay) });
+    const strangerSession = await bringUp(relay, stranger.ws, macFromNumber(22), cookie);
+    assert.notEqual(strangerSession.vmIP, first.vmIP);
+    stranger.ws.close();
+
+    // A reconnects with the same MAC and gets its address back.
+    const again = await openWebSocket(relay.wsPort, { token });
+    const framesAgain = new FrameQueue(again.ws);
+    const second = await bringUp(relay, again.ws, macA, cookie);
+    assert.equal(second.vmIP, first.vmIP);
+
+    // Its stack still has a connection the relay closed: reset with seq = ACK.
+    again.ws.send(buildTCPFrame({
+      vmMAC: macA, srcIP: second.vmIP, dstIP: "93.184.216.34", srcPort: 40500, dstPort: 443,
+      seq: 100, ack: 5000, flags: { ack: true, psh: true }, payload: Buffer.from("stale"),
+    }));
+    const rst = await framesAgain.waitFor((f) => f.kind === "tcp" && f.dstPort === 40500);
+    assert.equal(rst.rst, true);
+    assert.equal(rst.seq, 5000);
+    again.ws.close();
+    await delay(1700);
+
+    // After the hold expires, segments toward the old address are reset.
+    b.ws.send(buildTCPFrame(toA));
+    const late = await framesB.waitFor((f) => f.kind === "tcp" && f.dstPort === 40400);
+    assert.equal(late.rst, true);
+    b.ws.close();
+  } finally {
+    await relay.close();
+  }
+});
+
+test("takeover: a reconnect with the same MAC replaces a silent session of the same owner", NETWORK, async () => {
+  const relay = await startRelay({ hosted: true });
+  try {
+    const cookie = await relay.adminCookie();
+    const created = await httpJson(relay.adminPort, {
+      method: "POST", path: "/api/users", cookie, body: { username: "sleeper", password: "sleeper-password" },
+    });
+    const tokenRes = await httpJson(relay.adminPort, {
+      method: "POST", path: `/api/users/${created.body.id}/tokens`, cookie, body: { name: "t" },
+    });
+    const token = tokenRes.body.token;
+    const mac = macFromNumber(40);
+
+    // The old socket stays open but goes quiet, as after a laptop sleeps.
+    const old = await openWebSocket(relay.wsPort, { token });
+    const first = await bringUp(relay, old.ws, mac, cookie);
+    const oldClosed = new Promise((resolve) => old.ws.once("close", resolve));
+
+    const fresh = await openWebSocket(relay.wsPort, { token });
+    fresh.ws.send(buildARPRequest({ vmMAC: mac, vmIP: "0.0.0.0" }));
+    await delay(200);
+    assert.equal((await sessionsByMac(relay, cookie)).get(macString(mac)).sessionId, first.sessionId,
+      "a session that just spoke is not taken over");
+
+    await delay(5000);
+    const second = await bringUp(relay, fresh.ws, mac, cookie);
+    assert.notEqual(second.sessionId, first.sessionId);
+    assert.equal(second.vmIP, first.vmIP);
+    await oldClosed;
+    fresh.ws.close();
+  } finally {
+    await relay.close();
+  }
+});
+
+test("idle timeout: ping: heartbeats do not keep a session open, frames do", NETWORK, async () => {
+  const relay = await startRelay({ hosted: true, env: { SESSION_IDLE_TIMEOUT_MS: "600" } });
+  try {
+    const pinger = await openWebSocket(relay.wsPort, { token: await anonToken(relay) });
+    const framer = await openWebSocket(relay.wsPort, { token: await anonToken(relay) });
+    const closes = new Map();
+    for (const [name, client] of [["pinger", pinger], ["framer", framer]]) {
+      client.ws.on("close", (code, reason) => closes.set(name, { code, reason: reason.toString() }));
+    }
+    const mac = macFromNumber(30);
+    for (let i = 0; i < 10; i += 1) {
+      pinger.ws.send(`ping:${i}`);
+      framer.ws.send(buildARPRequest({ vmMAC: mac, vmIP: "0.0.0.0" }));
+      await delay(100);
+    }
+    assert.deepEqual(closes.get("pinger"), { code: 1000, reason: "idle timeout" });
+    assert.equal(closes.has("framer"), false);
+    framer.ws.close();
+  } finally {
+    await relay.close();
+  }
+});
+
 test("admission caps: anon sessions per token and per address, pool exhaustion reported", NETWORK, async () => {
   const relay = await startRelay({ hosted: true });
   try {

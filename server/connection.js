@@ -24,9 +24,11 @@ function createSessionRegistry({ ctx, tiers }) {
   function poolInUse() {
     // usedIPs always contains the gateway's last octet. Sessions that have
     // not taken an address yet (before DHCP) will, so they count too.
+    // Addresses held for a reconnect are evicted when the pool runs out.
     let waiting = 0;
     for (const session of sessions.values()) if (!session.vmIP) waiting += 1;
-    return Math.max(0, ctx.usedIPs.size - 1) + waiting;
+    const held = ctx.addressHolds ? ctx.addressHolds.size : 0;
+    return Math.max(0, ctx.usedIPs.size - 1 - held) + waiting;
   }
 
   // Slots held between admission and registration. Admission awaits the quota
@@ -239,7 +241,9 @@ function attachConnectionHandler(wss, {
 
     ws.on("message", (data, isBinary) => {
       session.lastActivityAt = now();
-      if (idleMs) resetIdle();
+      // Only frames count as activity: a client's ping: heartbeat must not
+      // keep a forgotten session open.
+      if (idleMs && isBinary) resetIdle();
       if (!isBinary) {
         const str = data.toString();
         if (str.startsWith("ping:")) {

@@ -327,6 +327,7 @@ pending account directly.
 | `INBOUND_RULES_ENABLED` | Enable the reverse proxy and port-forward rules. | `true` | `false` |
 | `TIERS_JSON` | Tier overrides. | unset | unset |
 | `WS_HEARTBEAT_MS`, `SESSION_IDLE_TIMEOUT_MS` | Ping interval (terminate after two missed pongs) and a global idle timeout override. | `30000`, `0` | same |
+| `ADDRESS_HOLD_MS` | How long a closed session's address stays reserved for its owner's reconnect; `0` releases it at once. | `0` | `60000` |
 | `SHUTDOWN_TIMEOUT_MS`, `SHUTDOWN_HARD_EXIT_MS` | Flush budget and hard exit after SIGTERM. | `500`, `800` | same |
 | `AUDIT_ENABLED`, `AUDIT_RETENTION_DAYS` | Connection audit log and its retention. | `false`, `30` | `true`, `30` |
 | `USAGE_FLUSH_INTERVAL_MS` | How often byte counters are persisted. | `30000` | same |

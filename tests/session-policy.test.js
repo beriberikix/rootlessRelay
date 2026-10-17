@@ -6,6 +6,7 @@ const { buildIPv4Packet, parseIPv4Packet, tcpChecksum } = require("../packet_uti
 const { createEgressPolicy } = require("../policy/egress");
 const { resolveTiers } = require("../policy/tiers");
 const { SessionPolicy, buildTcpReset, createPolicyFactory } = require("../policy/session_policy");
+const { createAddressHolds } = require("../policy/address_holds");
 
 const GATEWAY_IP = "10.0.2.2";
 const TIERS = resolveTiers(null, {
@@ -475,4 +476,137 @@ test("upload policing skips traffic to a reachable session of the same owner", (
   const toStranger = udpPacket({ srcIP: "10.0.2.15", dstIP: "10.0.2.17", dstPort: 6000, payload: Buffer.alloc(500) });
   assert.equal(admit(sender.policy, sender, toStranger), false);
   assert.equal(sender.policy.counters.uploadDrops, 1);
+});
+
+function parseReset(packet) {
+  const parsed = parseIPv4Packet(packet);
+  const tcp = parsed.packet.subarray(parsed.headerLength);
+  return {
+    srcIP: parsed.srcIP,
+    dstIP: parsed.dstIP,
+    srcPort: tcp.readUInt16BE(0),
+    dstPort: tcp.readUInt16BE(2),
+    seq: tcp.readUInt32BE(4),
+    ack: tcp.readUInt32BE(8),
+    flags: tcp[13],
+    checksumOk: tcpChecksum(parsed.packet) === tcp.readUInt16BE(16),
+  };
+}
+
+test("a segment for an unknown connection is reset as RFC 9293 describes", () => {
+  const policy = makePolicy({ tier: "user", owner: "user:1" });
+  const session = attach(policy, fakeSession());
+  const segment = { srcIP: "10.0.2.15", srcPort: 40000, dstIP: "93.184.216.34", dstPort: 443 };
+
+  // With ACK: a bare RST whose sequence number is the segment's ACK.
+  policy.onUnknownTcpSegment(session, { ...segment, seqNum: 100, ackNum: 5000, flags: 0x18, length: 10 });
+  let rst = parseReset(session.sent.pop());
+  assert.deepEqual(
+    [rst.srcIP, rst.srcPort, rst.dstIP, rst.dstPort, rst.seq, rst.flags],
+    ["93.184.216.34", 443, "10.0.2.15", 40000, 5000, 0x04],
+  );
+  assert.equal(rst.checksumOk, true);
+
+  // Without ACK: RST|ACK acknowledging the segment, FIN counting as one.
+  policy.onUnknownTcpSegment(session, { ...segment, seqNum: 0xfffffffe, ackNum: 0, flags: 0x01, length: 3 });
+  rst = parseReset(session.sent.pop());
+  assert.equal(rst.seq, 0);
+  assert.equal(rst.ack, 2, "sequence numbers wrap");
+  assert.equal(rst.flags, 0x14);
+
+  // A reset is never answered.
+  policy.onUnknownTcpSegment(session, { ...segment, seqNum: 1, ackNum: 1, flags: 0x14, length: 0 });
+  assert.equal(session.sent.length, 0);
+  assert.equal(policy.counters.unknownTcpResets, 2);
+});
+
+test("segments toward an address held for the owner are not reset; others are", () => {
+  const ctx = makeCtx();
+  ctx.addressHolds = createAddressHolds({ ctx, holdMs: 60000, setTimer: () => null, clearTimer: () => {} });
+  const gone = { vmIP: "10.0.2.16", vmMAC: "52:54:00:00:00:16" };
+  ctx.usedIPs.add(16);
+  ctx.ipToSession.set("10.0.2.16", gone);
+  assert.equal(ctx.addressHolds.hold(gone, "user:1"), true);
+
+  const segment = { srcIP: "10.0.2.15", srcPort: 40000, dstIP: "10.0.2.16", dstPort: 3240, seqNum: 1, ackNum: 1, flags: 0x10, length: 0 };
+  const peer = attach(makePolicy({ tier: "user", owner: "user:1", ctx }), fakeSession("a"));
+  peer.policy.onUnknownTcpSegment(peer, segment);
+  assert.equal(peer.sent.length, 0, "the peer may come back");
+
+  const stranger = attach(makePolicy({ tier: "user", owner: "user:2", ctx }), fakeSession("b"));
+  stranger.policy.onUnknownTcpSegment(stranger, segment);
+  assert.equal(stranger.sent.length, 1, "other owners see no difference from an unused address");
+});
+
+test("claimIP refuses an address held for another owner and reclaims one held for the same owner", () => {
+  const ctx = makeCtx();
+  ctx.addressHolds = createAddressHolds({ ctx, holdMs: 60000, setTimer: () => null, clearTimer: () => {} });
+  const gone = { vmIP: "10.0.2.20", vmMAC: "52:54:00:00:00:20" };
+  ctx.usedIPs.add(20);
+  ctx.ipToSession.set("10.0.2.20", gone);
+  ctx.addressHolds.hold(gone, "user:1");
+
+  const stranger = attach(makePolicy({ tier: "user", owner: "user:2", ctx }), fakeSession("b"));
+  assert.equal(admit(stranger.policy, stranger, tcpPacket({ srcIP: "10.0.2.20", dstIP: "1.1.1.1" })), false);
+  assert.equal(stranger.vmIP, null);
+
+  const back = attach(makePolicy({ tier: "user", owner: "user:1", ctx }), fakeSession("a"));
+  assert.equal(admit(back.policy, back, tcpPacket({ srcIP: "10.0.2.20", dstIP: "1.1.1.1" })), true);
+  assert.equal(back.vmIP, "10.0.2.20");
+  assert.equal(ctx.ipToSession.get("10.0.2.20"), back);
+  assert.equal(ctx.addressHolds.size, 0);
+});
+
+function silentHolder(ctx, { owner = "user:1", lastActivityAt = 0 } = {}) {
+  const holder = attach(makePolicy({ tier: "user", owner, ctx }), fakeSession("old"));
+  holder.vmIP = "10.0.2.30";
+  holder.vmMAC = "52:54:00:00:00:30";
+  holder.vmMACBytes = Buffer.from([0x52, 0x54, 0, 0, 0, 0x30]);
+  holder.lastActivityAt = lastActivityAt;
+  holder.ws = { readyState: 1, terminated: false, terminate() { this.terminated = true; } };
+  ctx.usedIPs.add(30);
+  ctx.macToIP.set(holder.vmMAC, holder.vmIP);
+  ctx.ipToSession.set(holder.vmIP, holder);
+  return holder;
+}
+
+test("a new session of the same owner takes over the MAC of a silent session", () => {
+  const ctx = makeCtx();
+  const holder = silentHolder(ctx);
+  const session = attach(makePolicy({ tier: "user", owner: "user:1", ctx, now: () => 10000 }), fakeSession("new"));
+
+  assert.equal(session.policy.admitFrame(session, holder.vmMACBytes), true);
+  assert.equal(holder.ws.terminated, true);
+  assert.equal(ctx.ipToSession.has("10.0.2.30"), false);
+  assert.equal(ctx.macToIP.get("52:54:00:00:00:30"), "10.0.2.30", "DHCP returns the same address");
+  assert.ok(ctx.usedIPs.has(30));
+  assert.equal(holder.vmMAC, null, "the old session's close releases nothing");
+  assert.equal(session.policy.counters.takeovers, 1);
+});
+
+test("no takeover of a session that is still talking, or of another owner's", () => {
+  const ctx = makeCtx();
+  const busy = silentHolder(ctx, { lastActivityAt: 8000 });
+  const session = attach(makePolicy({ tier: "user", owner: "user:1", ctx, now: () => 10000 }), fakeSession("new"));
+  assert.equal(session.policy.admitFrame(session, busy.vmMACBytes), false);
+  assert.equal(busy.ws.terminated, false);
+
+  const ctx2 = makeCtx();
+  const theirs = silentHolder(ctx2, { owner: "user:2" });
+  const stranger = attach(makePolicy({ tier: "user", owner: "user:1", ctx: ctx2, now: () => 10000 }), fakeSession("new"));
+  assert.equal(stranger.policy.admitFrame(stranger, theirs.vmMACBytes), false);
+  assert.equal(stranger.policy.admitIPv4 && admit(stranger.policy, stranger, tcpPacket({ srcIP: "10.0.2.30", dstIP: "1.1.1.1" })), false);
+  assert.equal(theirs.ws.terminated, false);
+});
+
+test("claiming a silent session's address with a new MAC takes it over and drops the old binding", () => {
+  const ctx = makeCtx();
+  const holder = silentHolder(ctx);
+  const session = attach(makePolicy({ tier: "user", owner: "user:1", ctx, now: () => 10000 }), fakeSession("new"));
+  session.vmMAC = "52:54:00:00:00:31";
+  assert.equal(admit(session.policy, session, tcpPacket({ srcIP: "10.0.2.30", dstIP: "1.1.1.1" })), true);
+  assert.equal(session.vmIP, "10.0.2.30");
+  assert.equal(ctx.ipToSession.get("10.0.2.30"), session);
+  assert.equal(ctx.macToIP.has("52:54:00:00:00:30"), false);
+  assert.equal(holder.ws.terminated, true);
 });

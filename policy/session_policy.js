@@ -30,6 +30,11 @@ const PEER_BURST_BYTES = 64 * 1024;
 const PEER_QUEUE_MAX_BYTES = 256 * 1024;
 const PEER_DRAIN_MIN_MS = 2;
 const PEER_DRAIN_MAX_MS = 50;
+// A new session of the same owner takes over the MAC and address of a live
+// session that has sent nothing for this long: after a sleep or a network
+// change the old socket can look open for up to two heartbeats, and its
+// MAC lock would drop every frame of the reconnected client.
+const TAKEOVER_SILENCE_MS = 5000;
 
 function unlimitedLimiter() {
   return { tryConsume: () => true, get usage() { return 0; } };
@@ -41,14 +46,16 @@ function makeLimiter(perSecond, now) {
   return new SlidingWindowRateLimiter(perSecond, 1000, now);
 }
 
+// ack: null sends a bare RST, as the reply to a segment that carried an ACK
+// (RFC 9293 section 3.10.7.1).
 function buildTcpReset({ srcIP, srcPort, dstIP, dstPort, seq = 0, ack = 0 }) {
   const tcp = Buffer.alloc(20);
   tcp.writeUInt16BE(srcPort, 0);
   tcp.writeUInt16BE(dstPort, 2);
   tcp.writeUInt32BE(seq >>> 0, 4);
-  tcp.writeUInt32BE(ack >>> 0, 8);
+  tcp.writeUInt32BE((ack ?? 0) >>> 0, 8);
   tcp[12] = 5 << 4;
-  tcp[13] = 0x14; // RST | ACK
+  tcp[13] = ack === null ? 0x04 : 0x14; // RST, or RST | ACK
   tcp.writeUInt16BE(0, 14);
   tcp.writeUInt16BE(0, 16);
   tcp.writeUInt16BE(0, 18);
@@ -155,6 +162,8 @@ class SessionPolicy {
       udpDenied: 0,
       dnsRateDrops: 0,
       connectTimeouts: 0,
+      unknownTcpResets: 0,
+      takeovers: 0,
     };
   }
 
@@ -171,7 +180,7 @@ class SessionPolicy {
   }
 
   // H3: a session keeps the MAC it first used, and may not borrow a MAC that
-  // another live session's IP is bound to.
+  // another live session's IP is bound to, unless it takes that session over.
   admitFrame(session, srcMAC) {
     if (!this.antiSpoof) return true;
     if (session.vmMACBytes) {
@@ -183,10 +192,37 @@ class SessionPolicy {
     const boundIP = this.ctx.macToIP.get(macStr);
     if (boundIP) {
       const holder = this.ctx.ipToSession.get(boundIP);
-      if (holder && holder !== session && isLive(holder)) {
+      if (holder && holder !== session && isLive(holder) && !this.takeOver(session, holder, macStr)) {
         this.counters.macDrops += 1;
         return false;
       }
+    }
+    return true;
+  }
+
+  // Takes a silent session of the same owner out of the way: its address
+  // stays reserved for the new session (allocateIP finds the MAC binding,
+  // claimIP finds the address free) and the old socket is terminated.
+  takeOver(session, holder, mac) {
+    if (!holder.policy || holder.policy.identity.owner !== this.identity.owner) return false;
+    if (this.now() - (holder.lastActivityAt || 0) < TAKEOVER_SILENCE_MS) return false;
+    const ip = holder.vmIP;
+    if (ip && this.ctx.ipToSession.get(ip) === holder) this.ctx.ipToSession.delete(ip);
+    if (holder.vmMAC && holder.vmMAC !== mac) this.ctx.macToIP.delete(holder.vmMAC);
+    // close() releases by MAC; the binding now belongs to the new session.
+    holder.vmIP = null;
+    holder.vmMAC = null;
+    this.counters.takeovers += 1;
+    this.log?.info("silent session taken over", {
+      owner: this.identity.owner,
+      sessionId: holder.sessionId,
+      by: session.sessionId,
+      vmIP: ip,
+    });
+    try {
+      holder.ws.terminate();
+    } catch (_error) {
+      // Already closing.
     }
     return true;
   }
@@ -240,7 +276,8 @@ class SessionPolicy {
     if (lastOctet < this.ctx.DHCP_START || lastOctet > this.ctx.DHCP_END) return false;
     if (srcIP === this.ctx.GATEWAY_IP || lastOctet === 255) return false;
     const holder = this.ctx.ipToSession.get(srcIP);
-    if (holder && holder !== session && isLive(holder)) return false;
+    if (holder && holder !== session && isLive(holder) && !this.takeOver(session, holder, session.vmMAC)) return false;
+    if (this.ctx.addressHolds && !this.ctx.addressHolds.mayClaim(this.identity.owner, srcIP)) return false;
 
     this.ctx.usedIPs.add(lastOctet);
     if (session.vmMAC) this.ctx.macToIP.set(session.vmMAC, srcIP);
@@ -248,6 +285,41 @@ class SessionPolicy {
     session.vmIP = srcIP;
     this.log?.info("vm ip learned", { owner: this.identity.owner, vmIP: srcIP });
     return true;
+  }
+
+  // On close: keep the address for the owner for a while instead of
+  // releasing it. False means relay.js releases it as before.
+  holdAddress(session) {
+    return Boolean(this.ctx.addressHolds && this.ctx.addressHolds.hold(session, this.identity.owner));
+  }
+
+  // Before DHCP or ARP allocates: restore an address held for this owner
+  // and MAC, so allocateIP returns it.
+  reclaimAddress(session, mac) {
+    if (session.vmIP) return;
+    this.ctx.addressHolds?.reclaimForMac(this.identity.owner, mac);
+  }
+
+  // A TCP segment for a connection the relay does not know, typically from
+  // a client that reconnected while its stack still had connections open.
+  // Reset it so the stack fails fast instead of retransmitting for minutes.
+  // Toward an address held for the owner, stay silent: that peer may come
+  // back, and connections between sessions survive the gap.
+  onUnknownTcpSegment(session, { srcIP, srcPort, dstIP, dstPort, seqNum, ackNum, flags, length }) {
+    if (flags & 0x04) return; // never answer a reset
+    if (this.ctx.addressHolds?.isHeldFor(this.identity.owner, dstIP)) return;
+    const syn = flags & 0x02 ? 1 : 0;
+    const fin = flags & 0x01 ? 1 : 0;
+    const hasAck = (flags & 0x10) !== 0;
+    this.counters.unknownTcpResets += 1;
+    session.sendIPToVM(buildTcpReset({
+      srcIP: dstIP,
+      srcPort: dstPort,
+      dstIP: srcIP,
+      dstPort: srcPort,
+      seq: hasAck ? ackNum : 0,
+      ack: hasAck ? null : (seqNum + length + syn + fin) >>> 0,
+    }));
   }
 
   // H5-H7: VM-to-VM only inside one owner's network.

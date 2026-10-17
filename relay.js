@@ -258,6 +258,9 @@ function allocateIP(mac) {
     }
   }
 
+  // HOSTED: a full pool reclaims the oldest address held for a reconnect.
+  if (hosted.addressHolds.evictOldest()) return allocateIP(mac);
+
   throw new Error("No available IPs in pool");
 }
 
@@ -1238,6 +1241,7 @@ class VMSession {
     // Assign IP based on MAC if not already assigned
     if (!this.vmIP && this.vmMAC) {
       try {
+        this.policy.reclaimAddress(this, this.vmMAC); // HOSTED: address hold
         this.vmIP = allocateIP(this.vmMAC);
         ipToSession.set(this.vmIP, this); // Register this session
         console.log(`✅ VM IP assigned: ${this.vmIP} (MAC: ${this.vmMAC})`);
@@ -1545,6 +1549,11 @@ class VMSession {
       if (log_level >= LOG_LEVEL_DEBUG && !RST) {
         console.log(`   ⚠ No connection for ${connKey}`);
       }
+      // HOSTED: reset stale connections after a reconnect.
+      this.policy.onUnknownTcpSegment(this, {
+        srcIP, srcPort, dstIP, dstPort, seqNum, ackNum, flags,
+        length: Math.max(0, parsed.totalLength - ihl - dataOffset),
+      });
       return;
     }
 
@@ -2322,6 +2331,7 @@ class VMSession {
     // Get or allocate IP for this MAC
     let assignedIP;
     try {
+      this.policy.reclaimAddress(this, clientMACStr); // HOSTED: address hold
       assignedIP = allocateIP(clientMACStr);
       if (!this.vmIP) {
         this.vmIP = assignedIP;
@@ -2461,7 +2471,8 @@ class VMSession {
 
   close() {
     // Release IP when session closes
-    if (this.vmMAC) {
+    // HOSTED: or hold it for the owner's reconnect.
+    if (this.vmMAC && !this.policy.holdAddress(this)) {
       releaseIP(this.vmMAC);
     }
 

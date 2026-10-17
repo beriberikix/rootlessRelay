@@ -19,6 +19,7 @@ const MODE_DEFAULTS = {
     auditEnabled: false,
     metricsEnabled: false,
     logJson: false,
+    addressHoldMs: 0,
   },
   hosted: {
     authRequired: true,
@@ -30,6 +31,7 @@ const MODE_DEFAULTS = {
     auditEnabled: true,
     metricsEnabled: true,
     logJson: true,
+    addressHoldMs: 60000,
   },
 };
 
@@ -196,6 +198,9 @@ function resolveConfig(env = process.env) {
     }),
     sessionIdleTimeoutMs: parseInteger(env.SESSION_IDLE_TIMEOUT_MS, 0, {
       name: "SESSION_IDLE_TIMEOUT_MS",
+    }),
+    addressHoldMs: parseInteger(env.ADDRESS_HOLD_MS, defaults.addressHoldMs, {
+      name: "ADDRESS_HOLD_MS",
     }),
     shutdownTimeoutMs: parseInteger(env.SHUTDOWN_TIMEOUT_MS, 500, {
       name: "SHUTDOWN_TIMEOUT_MS",
