@@ -122,12 +122,28 @@ function createUserApi({
   const redeemFailures = failureTracker();
   const acceptFailures = failureTracker();
 
+  // Members close their own sessions; owners and admins close any in the org.
+  // The list and the DELETE route both ask this, so the list never offers
+  // what the route would refuse.
+  function canCloseSession(identity, session) {
+    if (roleAllows(identity.orgRole, "session.close.any")) return true;
+    return session.identity.userId === identity.userId && roleAllows(identity.orgRole, "session.close.own");
+  }
+
+  // The org's live sessions, each saying who opened it and whether the caller
+  // may close it. Usernames go only to roles that may list the org's members
+  // (session.list and member.list are the same roles), so nothing new is shown.
   function ownSessions(identity) {
     const list = [];
     if (!activeSessions) return list;
     activeSessions.forEach((session, sessionId) => {
       if (session.identity && session.identity.owner === identity.owner) {
-        list.push(sessionSummary(sessionId, session));
+        list.push({
+          ...sessionSummary(sessionId, session),
+          username: session.identity.username || null,
+          own: session.identity.userId === identity.userId,
+          canClose: canCloseSession(identity, session),
+        });
       }
     });
     return list;
@@ -270,9 +286,7 @@ function createUserApi({
         if (!session || !session.identity || session.identity.owner !== identity.owner) {
           return [404, { error: "session not found" }];
         }
-        // Members close their own sessions; owners and admins close any in the org.
-        const own = session.identity.userId === identity.userId && roleAllows(identity.orgRole, "session.close.own");
-        if (!own && !roleAllows(identity.orgRole, "session.close.any")) return [403, { error: "forbidden" }];
+        if (!canCloseSession(identity, session)) return [403, { error: "forbidden" }];
         registry.kill(sessionId, 1008, "terminated by account owner");
         log?.info("session killed by owner", { sessionId, owner: identity.owner });
         return [204, null];

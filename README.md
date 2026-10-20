@@ -289,8 +289,8 @@ Browser origins must be in `ALLOWED_ORIGINS` (sessions: `SESSION_ALLOWED_ORIGINS
 | `GET /api/me` | Account, the org and role it acts in, tier limits, current-period usage, active session count. |
 | `GET /api/me/orgs` | Orgs the caller belongs to, with their role in each. |
 | `GET /api/me/usage` | Current period plus up to 12 monthly rows. |
-| `GET /api/me/sessions` | The caller's live sessions. |
-| `DELETE /api/me/sessions/:id` | Close one of the caller's sessions (code 1008). |
+| `GET /api/me/sessions` | The org's live sessions (the selected org's, for members of a shared org). Each has `username` (who opened it), `own` (the caller's own) and `canClose` (whether `DELETE` would be allowed). Roles that cannot list members cannot list sessions either, so usernames reach nobody new. |
+| `DELETE /api/me/sessions/:id` | Close a session (code 1008): members close their own, owners and admins any in the org; otherwise 403 `forbidden`, exactly as `canClose` said. |
 | `GET /api/me/tokens` | The caller's API tokens (never the secrets). |
 | `POST /api/me/tokens` | Create a token: `{ "name", "expiresInDays"? }`. The secret is returned once. At most 20 active tokens. Needs a sign-in (external JWT), not an API token. |
 | `DELETE /api/me/tokens/:id` | Revoke one of the caller's tokens and close sessions opened with it. Needs a sign-in. |
