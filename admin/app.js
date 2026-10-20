@@ -13,6 +13,7 @@ const expressSession = require("express-session");
 const { validateRule } = require("./rules");
 const { createOidcLogin } = require("./oidc");
 const { publicUser } = require("../auth/users");
+const { OrgError, ROLES, publicOrg } = require("../auth/orgs");
 
 async function bootstrapOperator({ users, config, log }) {
   if ((await users.countOperators()) > 0) return;
@@ -145,6 +146,8 @@ function createAdminApp({
   users,
   apiTokens,
   invites = null,
+  orgs = null,
+  orgInvites = null,
   sessionStore,
   activeSessions,
   registry,
@@ -570,6 +573,187 @@ function createAdminApp({
   }));
 
   // --- audit log and usage --------------------------------------------------
+
+  // ---- organizations ------------------------------------------------------
+  // Operators act as owners of every org. Shared orgs are created here during
+  // the beta; the public API only lets members manage their own org.
+
+  const operatorActor = (req) => ({ userId: req.user.id, operator: true });
+  const orgOwner = (id) => `org:${id}`;
+
+  function liveSessionCount(orgId) {
+    let count = 0;
+    if (activeSessions) {
+      activeSessions.forEach((session) => {
+        if (session.identity && session.identity.owner === orgOwner(orgId)) count += 1;
+      });
+    }
+    return count;
+  }
+
+  // Answers store errors as the HTTP statuses they carry; true when handled.
+  function orgFailure(res, error) {
+    if (error instanceof OrgError) {
+      res.status(error.status).json({ error: error.code });
+      return true;
+    }
+    if (error instanceof RangeError) {
+      res.status(400).json({ error: error.message });
+      return true;
+    }
+    return false;
+  }
+
+  async function findOrg(req, res) {
+    const id = parseId(req.params.id);
+    const org = orgs && id ? await orgs.findById(id) : null;
+    if (!org) {
+      res.sendStatus(404);
+      return null;
+    }
+    return org;
+  }
+
+  function unknownTier(tier) {
+    return tiers && !tiers[tier] ? `unknown tier; known tiers: ${Object.keys(tiers).join(", ")}` : null;
+  }
+
+  app.get("/api/orgs", asyncRoute(async (_req, res) => {
+    if (!orgs) {
+      res.status(200).json([]);
+      return;
+    }
+    const list = await orgs.listWithCounts();
+    res.status(200).json(list.map((org) => ({ ...org, sessions: liveSessionCount(org.id) })));
+  }));
+
+  app.post("/api/orgs", asyncRoute(async (req, res) => {
+    const { name, ownerUserId, tier } = req.body || {};
+    const owner = orgs && parseId(ownerUserId) ? await users.findById(parseId(ownerUserId)) : null;
+    if (!owner) {
+      res.status(400).json({ error: "ownerUserId must be an existing user" });
+      return;
+    }
+    if (tier !== undefined && unknownTier(tier)) {
+      res.status(400).json({ error: unknownTier(tier) });
+      return;
+    }
+    try {
+      const org = await orgs.create({ name, ownerUserId: owner.id, tier: tier || "user" });
+      log?.info("org created", { orgId: org.id, ownerUserId: owner.id, by: req.user.username });
+      res.status(201).json(publicOrg(org));
+    } catch (error) {
+      if (!orgFailure(res, error)) throw error;
+    }
+  }));
+
+  app.get("/api/orgs/:id", asyncRoute(async (req, res) => {
+    const org = await findOrg(req, res);
+    if (!org) return;
+    res.status(200).json({
+      ...publicOrg(org),
+      sessions: liveSessionCount(org.id),
+      members: await orgs.listMembers(org.id),
+      tokens: await apiTokens.listForOrg(org.id),
+      invites: orgInvites ? await orgInvites.list(org.id) : [],
+    });
+  }));
+
+  app.post("/api/orgs/:id/tier", asyncRoute(async (req, res) => {
+    const org = await findOrg(req, res);
+    if (!org) return;
+    const tier = req.body && req.body.tier;
+    if (typeof tier !== "string" || unknownTier(tier)) {
+      res.status(400).json({ error: unknownTier(tier) || "tier is required" });
+      return;
+    }
+    await orgs.setTier(org.id, tier);
+    log?.info("org tier changed", { orgId: org.id, tier, by: req.user.username });
+    res.status(200).json(publicOrg(await orgs.findById(org.id)));
+  }));
+
+  async function setOrgStatus(req, res, status) {
+    const org = await findOrg(req, res);
+    if (!org) return;
+    await orgs.setStatus(org.id, status);
+    let killed = 0;
+    if (status === "suspended" && registry) killed = registry.killOwner(orgOwner(org.id), 1008, "organization suspended");
+    log?.info("org status changed", { orgId: org.id, status, killedSessions: killed, by: req.user.username });
+    res.status(200).json({ ...publicOrg(await orgs.findById(org.id)), killedSessions: killed });
+  }
+  app.post("/api/orgs/:id/suspend", asyncRoute((req, res) => setOrgStatus(req, res, "suspended")));
+  app.post("/api/orgs/:id/unsuspend", asyncRoute((req, res) => setOrgStatus(req, res, "active")));
+
+  app.delete("/api/orgs/:id", asyncRoute(async (req, res) => {
+    const org = await findOrg(req, res);
+    if (!org) return;
+    try {
+      await orgs.remove(org.id);
+    } catch (error) {
+      if (!orgFailure(res, error)) throw error;
+      return;
+    }
+    const killed = registry ? registry.killOwner(orgOwner(org.id), 1008, "organization deleted") : 0;
+    log?.info("org deleted", { orgId: org.id, killedSessions: killed, by: req.user.username });
+    res.sendStatus(204);
+  }));
+
+  app.post("/api/orgs/:id/members", asyncRoute(async (req, res) => {
+    const org = await findOrg(req, res);
+    if (!org) return;
+    const { userId, role } = req.body || {};
+    const user = parseId(userId) ? await users.findById(parseId(userId)) : null;
+    if (!user) {
+      res.status(400).json({ error: "userId must be an existing user" });
+      return;
+    }
+    if (!ROLES.includes(role)) {
+      res.status(400).json({ error: `role must be one of ${ROLES.join(", ")}` });
+      return;
+    }
+    try {
+      res.status(201).json(await orgs.addMember({ orgId: org.id, userId: user.id, role }));
+    } catch (error) {
+      if (!orgFailure(res, error)) throw error;
+    }
+  }));
+
+  app.post("/api/orgs/:id/members/:userId/role", asyncRoute(async (req, res) => {
+    const org = await findOrg(req, res);
+    if (!org) return;
+    const userId = parseId(req.params.userId);
+    const role = req.body && req.body.role;
+    if (!ROLES.includes(role)) {
+      res.status(400).json({ error: `role must be one of ${ROLES.join(", ")}` });
+      return;
+    }
+    try {
+      const result = await orgs.setMemberRole({ orgId: org.id, actor: operatorActor(req), userId, role });
+      // Roles that cannot open sessions end the member's live ones.
+      if (!["owner", "admin", "member"].includes(role) && registry && registry.killMember) {
+        registry.killMember(orgOwner(org.id), userId, 1008, "role changed");
+      }
+      log?.info("org role changed", { orgId: org.id, userId, role, by: req.user.username });
+      res.status(200).json(result);
+    } catch (error) {
+      if (!orgFailure(res, error)) throw error;
+    }
+  }));
+
+  app.delete("/api/orgs/:id/members/:userId", asyncRoute(async (req, res) => {
+    const org = await findOrg(req, res);
+    if (!org) return;
+    const userId = parseId(req.params.userId);
+    try {
+      await orgs.removeMember({ orgId: org.id, actor: operatorActor(req), userId });
+    } catch (error) {
+      if (!orgFailure(res, error)) throw error;
+      return;
+    }
+    const killed = registry && registry.killMember ? registry.killMember(orgOwner(org.id), userId, 1008, "removed from organization") : 0;
+    log?.info("org member removed", { orgId: org.id, userId, killedSessions: killed, by: req.user.username });
+    res.sendStatus(204);
+  }));
 
   app.get("/api/audit", asyncRoute(async (req, res) => {
     if (!audit || !audit.enabled) {

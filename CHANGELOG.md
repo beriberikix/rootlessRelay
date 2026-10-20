@@ -58,8 +58,21 @@
   invitee accepts at `POST /api/invites/accept` with a sign-in whose address
   is verified and matches. Accepting never activates a pending account.
 
+- Operator panel: an Orgs tab. List every org with kind, tier, status, member
+  and live-session counts; create a shared org for an existing user; set an
+  org's tier (a personal org's tier also updates its owner's account);
+  suspend (ends live sessions) and unsuspend; delete a shared org; open an org
+  to see its members, the API tokens running as it and its invitations, add a
+  member, change a role, remove a member, or revoke one of its tokens.
+  Operators act as owners, so the last-owner rule still applies. Admin API:
+  `/api/orgs` (list, create), `/api/orgs/:id` (read, delete),
+  `POST /api/orgs/:id/{tier,suspend,unsuspend}`, and members under
+  `/api/orgs/:id/members`.
+
 ### Changed
 
+- The panel's user delete reports failures (it used to show success on a 409
+  `sole-owner`).
 - Tier is read from the org; setting a user's tier sets it on their personal
   org too. Bans and account deletion close sessions by user (`killUser`), not
   by owner.
