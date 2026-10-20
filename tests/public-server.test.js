@@ -9,6 +9,7 @@ const {
   AuthError,
   createPublicServer,
   extractCredential,
+  extractOrg,
   selectProtocol,
 } = require("../server/public");
 
@@ -82,6 +83,21 @@ test("credential extraction prefers the subprotocol, then bearer, then query onl
   assert.equal(selectProtocol(new Set(["relay.token.abc", "relay.v1"])), "relay.v1");
   assert.equal(selectProtocol(new Set(["relay.token.abc", "custom"])), "custom");
   assert.equal(selectProtocol(new Set(["relay.token.abc"])), false);
+  assert.equal(selectProtocol(new Set(["relay.token.abc", "relay.org.7"])), false, "the org entry is not a protocol to select");
+  assert.equal(selectProtocol(new Set(["relay.org.7", "relay.v1"])), "relay.v1");
+});
+
+test("the org a request names comes from a subprotocol entry or X-Relay-Org; anything else is refused", () => {
+  const req = (headers) => ({ headers, url: "/" });
+  assert.equal(extractOrg(req({})), null);
+  assert.equal(extractOrg(req({ "sec-websocket-protocol": "relay.v1, relay.token.abc, relay.org.42" })), 42);
+  assert.equal(extractOrg(req({ "x-relay-org": " 9 " })), 9);
+  assert.equal(extractOrg(req({ "x-relay-org": "" })), null);
+  const invalid = (error) => error instanceof AuthError && error.status === 400 && error.code === "invalid-org";
+  for (const bad of ["0", "-1", "1.5", "abc", "1e3", "12345678901", "7 8"]) {
+    assert.throws(() => extractOrg(req({ "x-relay-org": bad })), invalid, bad);
+  }
+  assert.throws(() => extractOrg(req({ "sec-websocket-protocol": "relay.org.x" })), invalid);
 });
 
 test("local mode: healthz, 404s, plain WebSocket accepted as local identity, 503 while shutting down", async () => {
@@ -113,8 +129,8 @@ test("hosted mode: credential required, authenticator errors map to HTTP statuse
   const seen = [];
   const { server, port, connections } = await startServer({
     env: { RELAY_MODE: "hosted", ADMIN_SESSION_SECRET: "s", ANON_TOKEN_SECRET: "a", LOG_LEVEL: "0" },
-    authenticate: async (token, { clientIP }) => {
-      seen.push({ token, clientIP });
+    authenticate: async (token, { clientIP, orgId }) => {
+      seen.push({ token, clientIP, orgId });
       if (token === "good") return { kind: "user", owner: "user:1", tier: "user", username: "alice" };
       if (token === "banned") throw new AuthError(403, "account-suspended");
       throw new AuthError(401, "invalid-token");
@@ -128,7 +144,15 @@ test("hosted mode: credential required, authenticator errors map to HTTP statuse
     assert.equal(status, 101);
     assert.equal(connections[0].extra.identity.username, "alice");
     assert.equal(seen.at(-1).token, "good");
+    assert.equal(seen.at(-1).orgId, null);
     ws.close();
+
+    // The org named in the handshake reaches the authenticator.
+    const named = await connect(port, { protocols: ["relay.v1", "relay.token.good", "relay.org.5"] });
+    assert.equal(named.status, 101);
+    assert.equal(seen.at(-1).orgId, 5);
+    named.ws.close();
+    assert.equal((await connect(port, { protocols: ["relay.v1", "relay.token.good", "relay.org.nope"] })).status, 400);
   } finally {
     await server.close();
   }

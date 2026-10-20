@@ -205,7 +205,11 @@ function createJwtVerifier({
       // as the username (it could impersonate someone else's email).
       const verified = verifiedClaim === null || payload[verifiedClaim] === true;
       const username = verified && typeof payload[usernameClaim] === "string" ? payload[usernameClaim] : null;
-      return { iss: payload.iss, sub: payload.sub, username, claims: payload };
+      // Without a verifiedClaim nothing vouches for the address, so it is not
+      // treated as verified (org invites need one).
+      const emailVerified = verifiedClaim !== null && verified && username !== null;
+      const email = emailVerified ? username.toLowerCase() : null;
+      return { iss: payload.iss, sub: payload.sub, username, email, emailVerified, claims: payload };
     },
   };
 }
@@ -247,10 +251,17 @@ function checkStatus(user, allowPending) {
 // account-API context (as opposed to opening a session): it lets pending
 // users, suspended orgs and roles that cannot open sessions through, so they
 // can still read their account.
-async function resolveOrg({ orgs, user, orgId, allowPending }) {
+// `requested` is an org the client named; it must be one the user belongs to
+// (a missing org and a foreign org answer the same, so ids cannot be probed).
+async function resolveOrg({ orgs, user, orgId, requested = null, allowPending }) {
   let org = null;
-  if (orgId) org = await orgs.findById(orgId);
-  if (!org) org = await orgs.ensurePersonalOrg(user.id);
+  if (requested) {
+    org = await orgs.findById(requested);
+    if (!org) throw new AuthError(403, "not-a-member");
+  } else {
+    if (orgId) org = await orgs.findById(orgId);
+    if (!org) org = await orgs.ensurePersonalOrg(user.id);
+  }
   if (!org) throw new AuthError(403, "no-organization");
   const role = (await orgs.getMembership(org.id, user.id))?.role || null;
   if (!role) throw new AuthError(403, "not-a-member");
@@ -262,7 +273,7 @@ async function resolveOrg({ orgs, user, orgId, allowPending }) {
 }
 
 function createAuthenticator({ config, users, apiTokens, orgs, anon = null, jwt = null, log = null }) {
-  return async function authenticate(token, { clientIP, allowPending = false } = {}) {
+  return async function authenticate(token, { clientIP, allowPending = false, orgId: requestedOrg = null } = {}) {
     if (!token) {
       if (config.authRequired) throw new AuthError(401, "authentication-required");
       return LOCAL_IDENTITY;
@@ -273,6 +284,8 @@ function createAuthenticator({ config, users, apiTokens, orgs, anon = null, jwt 
       if (!result) throw new AuthError(401, "invalid-token");
       if (!result.user) throw new AuthError(401, result.reason || "invalid-token");
       checkStatus(result.user, allowPending);
+      // A token is bound to its org; naming another one is an error, not a switch.
+      if (requestedOrg && requestedOrg !== result.orgId) throw new AuthError(403, "token-org-mismatch");
       const { org, role } = await resolveOrg({ orgs, user: result.user, orgId: result.orgId, allowPending });
       return { ...identityFor({ user: result.user, org, role, via: "api-token" }), tokenId: result.token.id };
     }
@@ -299,8 +312,10 @@ function createAuthenticator({ config, users, apiTokens, orgs, anon = null, jwt 
       });
       checkStatus(user, allowPending);
       await users.touchLogin(user.id);
-      const { org, role } = await resolveOrg({ orgs, user, orgId: user.default_org_id, allowPending });
-      return identityFor({ user, org, role, via: "jwt" });
+      const { org, role } = await resolveOrg({ orgs, user, orgId: user.default_org_id, requested: requestedOrg, allowPending });
+      // The address is only offered for matching an org invite when the IdP
+      // vouches for it (JWT_VERIFIED_CLAIM).
+      return { ...identityFor({ user, org, role, via: "jwt" }), email: verified.email, emailVerified: verified.emailVerified };
     }
 
     log?.warn("token from unknown issuer", { issuer: unverified.iss, clientIP });

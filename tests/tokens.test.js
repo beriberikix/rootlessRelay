@@ -260,3 +260,50 @@ test("external JWTs: unverified emails are not used as usernames; algorithms are
   });
   await assert.rejects(mixed.verify(await sign({}, "PS256", ps.privateKey)), (error) => error.code === "invalid-jwt", "only RS256 by default");
 });
+
+test("a signed-in user acts in the org they name, and the verified email is exposed only when the IdP vouches", async () => {
+  const { db, users, orgs, apiTokens, clock } = await setup();
+  const { privateKey, publicKey } = await jose.generateKeyPair("RS256");
+  const jwk = await jose.exportJWK(publicKey);
+  const verifier = (verifiedClaim) => createJwtVerifier({
+    issuer: "https://idp.example", audience: "relay", jwksUrl: "https://idp.example/jwks",
+    jwks: jose.createLocalJWKSet({ keys: [jwk] }), usernameClaim: "email", verifiedClaim, now: () => clock.now,
+  });
+  const sign = (claims) => new jose.SignJWT(claims)
+    .setProtectedHeader({ alg: "RS256" }).setIssuer("https://idp.example").setAudience("relay")
+    .setSubject("sub-dana").setIssuedAt(Math.floor(clock.now / 1000)).setExpirationTime(Math.floor(clock.now / 1000) + 300)
+    .sign(privateKey);
+  const config = { authRequired: true, anonEnabled: false, jwt: { defaultTier: "user" } };
+  const authenticateWith = (verifiedClaim) => createAuthenticator({ config, users, apiTokens, orgs, jwt: verifier(verifiedClaim) });
+
+  const vouched = await sign({ email: "Dana@Example.com", email_verified: true });
+  const authenticate = authenticateWith("email_verified");
+  const first = await authenticate(vouched, {});
+  assert.equal(first.email, "dana@example.com", "lower-cased for matching an invite");
+  assert.equal(first.emailVerified, true);
+  assert.equal(first.orgRole, "owner");
+
+  // Unverified address: not offered, and not used as the username.
+  const unverified = await sign({ email: "dana@example.com", email_verified: false });
+  const second = await authenticate(unverified, {});
+  assert.equal(second.emailVerified, false);
+  assert.equal(second.email, null);
+  // No verified claim configured: nothing vouches, so no invite matching.
+  const unconfigured = await authenticateWith(null)(vouched, {});
+  assert.equal(unconfigured.emailVerified, false);
+  assert.equal(unconfigured.email, null);
+
+  // Default org unless one is named; naming one needs membership.
+  const dana = await users.findByExternalSub("https://idp.example|sub-dana");
+  const team = await orgs.create({ name: "team", ownerUserId: (await users.create({ username: "boss" })).id });
+  const refused = (error) => error.status === 403 && error.code === "not-a-member";
+  assert.equal((await authenticate(vouched, {})).orgId, dana.default_org_id);
+  await assert.rejects(authenticate(vouched, { orgId: team.id }), refused);
+  await assert.rejects(authenticate(vouched, { orgId: 987654 }), refused, "a missing org answers like a foreign one");
+  await orgs.addMember({ orgId: team.id, userId: dana.id, role: "member" });
+  const inTeam = await authenticate(vouched, { orgId: team.id });
+  assert.equal(inTeam.owner, `org:${team.id}`);
+  assert.equal(inTeam.orgRole, "member");
+  assert.equal((await authenticate(vouched, { orgId: dana.default_org_id })).orgRole, "owner");
+  await db.close();
+});

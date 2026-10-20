@@ -129,6 +129,19 @@ function createSessionRegistry({ ctx, tiers }) {
       }
       return count;
     },
+    // Closes one member's sessions in one org (membership ended or role changed).
+    killMember(owner, userId, code = 1008, reason = "removed from organization") {
+      const set = byOwner.get(owner);
+      if (!set) return 0;
+      let count = 0;
+      for (const session of [...set]) {
+        if (session.identity && session.identity.userId === userId) {
+          session.ws.close(code, reason);
+          count += 1;
+        }
+      }
+      return count;
+    },
     killOwner(owner, code = 1008, reason = "account suspended") {
       const set = byOwner.get(owner);
       if (!set) return 0;

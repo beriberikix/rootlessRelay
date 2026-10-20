@@ -286,7 +286,8 @@ Browser origins must be in `ALLOWED_ORIGINS` (sessions: `SESSION_ALLOWED_ORIGINS
 
 | Route | Purpose |
 |---|---|
-| `GET /api/me` | Account, tier limits, current-period usage, active session count. |
+| `GET /api/me` | Account, the org and role it acts in, tier limits, current-period usage, active session count. |
+| `GET /api/me/orgs` | Orgs the caller belongs to, with their role in each. |
 | `GET /api/me/usage` | Current period plus up to 12 monthly rows. |
 | `GET /api/me/sessions` | The caller's live sessions. |
 | `DELETE /api/me/sessions/:id` | Close one of the caller's sessions (code 1008). |
@@ -294,7 +295,30 @@ Browser origins must be in `ALLOWED_ORIGINS` (sessions: `SESSION_ALLOWED_ORIGINS
 | `POST /api/me/tokens` | Create a token: `{ "name", "expiresInDays"? }`. The secret is returned once. At most 20 active tokens. Needs a sign-in (external JWT), not an API token. |
 | `DELETE /api/me/tokens/:id` | Revoke one of the caller's tokens and close sessions opened with it. Needs a sign-in. |
 | `POST /api/me/redeem` | Redeem an invite code: `{ "code" }`. Activates a pending account; 10 failed attempts per hour per account. |
-| `DELETE /api/me` | Delete the caller's account, tokens and usage: `{ "confirm": "<username>" }`. Needs a sign-in (external JWT), not an API token; operators are deleted from the admin panel. |
+| `DELETE /api/me` | Delete the caller's account, tokens and usage: `{ "confirm": "<username>" }`. Orgs it alone belongs to are deleted with it; refused with 409 `sole-owner` while it solely owns an org that has other members. Needs a sign-in (external JWT), not an API token; operators are deleted from the admin panel. |
+
+**Organizations.** Sessions, tokens, tier and usage belong to an org; members of
+an org share a private network, session cap and monthly quota. Every account
+has a personal org. A request acts in the account's default org unless it names
+another one it belongs to: `X-Relay-Org: <id>` on HTTP, or an extra
+`relay.org.<id>` entry in the WebSocket subprotocol list (browsers cannot set
+headers there). An API token is bound to the org it was created in; naming a
+different org with it is refused (`token-org-mismatch`). Naming an org the
+caller is not in, or one that does not exist, is `403 not-a-member`.
+
+| Route | Purpose |
+|---|---|
+| `POST /api/orgs` | Create an org: `{ "name", "ownerUserId"?, "tier"? }`. Operators only during the beta. Needs a sign-in. |
+| `GET /api/orgs/:id` | The org and the caller's role. 404 unless the caller is a member. |
+| `PATCH /api/orgs/:id` | Rename: `{ "name" }`. Owners and admins. |
+| `DELETE /api/orgs/:id` | Delete the org, its tokens and usage, and close its sessions. Owners; not personal orgs. |
+| `GET /api/orgs/:id/members` | Members and roles. Not for `billing`. |
+| `PATCH /api/orgs/:id/members/:userId` | Change a role: `{ "role" }`. Owners and admins; only owners grant or change `owner`; nobody changes their own role. A role that cannot open sessions (`billing`, `read_only`) ends the member's live sessions. |
+| `DELETE /api/orgs/:id/members/:userId` | Remove a member, or leave (own id). Revokes the member's tokens in the org and closes their sessions. The last owner cannot go (409 `last-owner`). |
+
+Roles: `owner`, `admin`, `member`, `billing`, `read_only`. The permission
+matrix is in `auth/orgs.js` (`PERMISSIONS`) and mirrored in
+`tests/orgs.test.js`.
 
 With `SIGNUP_MODE=invite`, an account first seen through the external
 identity provider starts `pending`. It can call `GET /api/me`, redeem an
@@ -316,7 +340,7 @@ pending account directly.
 | `TRUSTED_PROXY_CIDRS`, `PEER_IP_HEADER` | Only believe `CLIENT_IP_HEADER` when the peer (socket address, or `PEER_IP_HEADER` such as `fly-client-ip`) is in these ranges, e.g. Cloudflare's. | unset | unset (warns when `TRUST_PROXY` is on) |
 | `ADMIN_OIDC_ISSUER`, `ADMIN_OIDC_CLIENT_ID`, `ADMIN_OIDC_CLIENT_SECRET`, `ADMIN_OIDC_REDIRECT_URL` | Operator single sign-on for the admin panel (OIDC code flow). The callback path comes from the redirect URL; an operator's account must have the provider identity as `external_sub` (`<iss>\|<sub>`). | unset | unset |
 | `ADMIN_OIDC_REQUIRE_MFA`, `ADMIN_PASSWORD_LOGIN` | Refuse SSO logins whose ID token lacks `amr: ["mfa"]`; keep the password form. | `true`, `true` | same |
-| `JWT_ALGORITHMS`, `JWT_VERIFIED_CLAIM` | Allowed JWT algorithms; claim that must be `true` before the email becomes the username. | `RS256`, unset | same |
+| `JWT_ALGORITHMS`, `JWT_VERIFIED_CLAIM` | Allowed JWT algorithms; claim that must be `true` before the email becomes the username. Also required for org invites: without it no address counts as verified. | `RS256`, unset | same |
 | `SIGNUP_MODE` | `open`, or `invite` to create new external accounts as pending until they redeem an invite code. | `open` | `open` |
 | `ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call the HTTP APIs (`/api/me`, anonymous tokens) and, unless `SESSION_ALLOWED_ORIGINS` is set, to open sessions. | unset | unset (warns) |
 | `SESSION_ALLOWED_ORIGINS` | Browser origins allowed to open sessions; `*` for any. Safe to open up because sessions authenticate with a token, not a cookie. | `ALLOWED_ORIGINS` | `ALLOWED_ORIGINS` |
