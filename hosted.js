@@ -21,6 +21,7 @@ const { openDatabase } = require("./auth/db");
 const { createUserStore } = require("./auth/users");
 const { createInviteStore } = require("./auth/invites");
 const { createOrgStore } = require("./auth/orgs");
+const { createOrgInviteStore } = require("./auth/org_invites");
 const { SqliteSessionStore } = require("./auth/session_store");
 const tokens = require("./auth/tokens");
 const { createAuditLog, noopAudit } = require("./metering/audit");
@@ -128,6 +129,7 @@ function init(ctx) {
     apiTokens: null,
     invites: null,
     orgs: null,
+    orgInvites: null,
     anon: null,
     jwt: null,
     authenticate: null,
@@ -164,6 +166,7 @@ function init(ctx) {
         users: () => state.users,
         apiTokens: () => state.apiTokens,
         orgs: () => state.orgs,
+        orgInvites: () => state.orgInvites,
         invites: () => state.invites,
         usage,
         registry,
@@ -225,6 +228,7 @@ function init(ctx) {
     state.apiTokens = tokens.createApiTokenStore(db);
     state.invites = createInviteStore(db);
     state.orgs = createOrgStore(db);
+    state.orgInvites = createOrgInviteStore(db, { orgs: state.orgs });
     if (config.anonEnabled && config.anonTokenSecret) {
       state.anon = tokens.createAnonIssuer({
         secret: config.anonTokenSecret,

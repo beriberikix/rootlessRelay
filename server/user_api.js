@@ -12,9 +12,11 @@
 
 const { AuthError, extractCredential, extractOrg, readJsonBody, writeJson } = require("./public");
 const { ROLES, publicOrg, roleAllows } = require("../auth/orgs");
+const { INVITABLE_ROLES } = require("../auth/org_invites");
 
 const PREFIX = "/api/me";
 const ORGS_PREFIX = "/api/orgs";
+const INVITE_ACCEPT_PATH = "/api/invites/accept";
 const MAX_ACTIVE_TOKENS = 20;
 const MAX_TOKEN_DAYS = 365;
 const REDEEM_FAILURES_PER_HOUR = 10;
@@ -67,6 +69,7 @@ function createUserApi({
   users,
   apiTokens,
   orgs = null,
+  orgInvites = null,
   invites = null,
   usage,
   registry,
@@ -99,15 +102,25 @@ function createUserApi({
     if (identity.via !== "jwt") throw new AuthError(403, "sign-in-required");
   }
 
-  // Failed redemptions per user in the last hour, to slow down guessing.
-  const redeemFailures = new Map(); // userId -> [timestamps]
-  function recentFailures(userId) {
-    const cutoff = now() - 60 * 60 * 1000;
-    const list = (redeemFailures.get(userId) || []).filter((t) => t > cutoff);
-    if (list.length) redeemFailures.set(userId, list);
-    else redeemFailures.delete(userId);
-    return list;
+  // Failed guesses per user in the last hour, to slow down guessing of
+  // signup codes and org invitation tokens.
+  function failureTracker() {
+    const failures = new Map(); // userId -> [timestamps]
+    const recent = (userId) => {
+      const cutoff = now() - 60 * 60 * 1000;
+      const list = (failures.get(userId) || []).filter((t) => t > cutoff);
+      if (list.length) failures.set(userId, list);
+      else failures.delete(userId);
+      return list;
+    };
+    return {
+      tooMany: (userId) => recent(userId).length >= REDEEM_FAILURES_PER_HOUR,
+      add: (userId) => failures.set(userId, [...recent(userId), now()]),
+      clear: (userId) => failures.delete(userId),
+    };
   }
+  const redeemFailures = failureTracker();
+  const acceptFailures = failureTracker();
 
   function ownSessions(identity) {
     const list = [];
@@ -133,6 +146,8 @@ function createUserApi({
   const ORG_PATH = /^\/api\/orgs\/([0-9]+)$/;
   const MEMBERS_PATH = /^\/api\/orgs\/([0-9]+)\/members$/;
   const MEMBER_PATH = /^\/api\/orgs\/([0-9]+)\/members\/([0-9]+)$/;
+  const INVITES_PATH = /^\/api\/orgs\/([0-9]+)\/invites$/;
+  const INVITE_PATH = /^\/api\/orgs\/([0-9]+)\/invites\/([0-9]+)$/;
 
   // Who is acting, as the org store wants it. Operators pass every check.
   function principal(identity) {
@@ -210,17 +225,17 @@ function createUserApi({
         if (identity.status !== "pending") return [409, { error: "account is already active" }];
         const inviteStore = store(invites);
         if (!inviteStore) return [404, { error: "invites are not enabled" }];
-        if (recentFailures(identity.userId).length >= REDEEM_FAILURES_PER_HOUR) {
+        if (redeemFailures.tooMany(identity.userId)) {
           return [429, { error: "too many attempts; try again later" }];
         }
         const body = await readJsonBody(req);
         if (!(await inviteStore.redeem(body && body.code, identity.userId))) {
-          redeemFailures.set(identity.userId, [...recentFailures(identity.userId), now()]);
+          redeemFailures.add(identity.userId);
           log?.warn("invite redemption failed", { userId: identity.userId });
           return [400, { error: "invalid, used or expired invite code" }];
         }
         await store(users).activatePending(identity.userId);
-        redeemFailures.delete(identity.userId);
+        redeemFailures.clear(identity.userId);
         log?.info("invite redeemed", { userId: identity.userId });
         return [200, { status: "active" }];
       },
@@ -402,6 +417,74 @@ function createUserApi({
       },
     },
     {
+      method: "GET",
+      match: (path) => INVITES_PATH.test(path),
+      async handle({ identity, path }) {
+        const orgId = await authorizeOrg(identity, "member.invite", path);
+        return [200, await store(orgInvites).list(orgId)];
+      },
+    },
+    {
+      method: "POST",
+      match: (path) => INVITES_PATH.test(path),
+      async handle({ identity, req, path }) {
+        requireSignIn(identity);
+        const orgId = await authorizeOrg(identity, "member.invite", path);
+        const body = await readJsonBody(req);
+        if (!INVITABLE_ROLES.includes(body.role)) {
+          return [400, { error: `role must be one of ${INVITABLE_ROLES.join(", ")}` }];
+        }
+        let created;
+        try {
+          created = await store(orgInvites).create({ orgId, email: body.email, role: body.role, createdBy: identity.userId });
+        } catch (error) {
+          if (error instanceof RangeError) return [400, { error: error.message }];
+          throw error;
+        }
+        // The token is not logged: it is the credential.
+        log?.info("org invite created", { orgId, inviteId: created.id, role: created.role, by: identity.userId });
+        return [201, created];
+      },
+    },
+    {
+      method: "DELETE",
+      match: (path) => INVITE_PATH.test(path),
+      async handle({ identity, path }) {
+        requireSignIn(identity);
+        const orgId = await authorizeOrg(identity, "member.invite", path);
+        const inviteId = parseId(INVITE_PATH.exec(path)[2]);
+        if (!inviteId || !(await store(orgInvites).revoke(orgId, inviteId))) return [404, { error: "invite not found" }];
+        log?.info("org invite revoked", { orgId, inviteId, by: identity.userId });
+        return [204, null];
+      },
+    },
+    {
+      method: "POST",
+      match: (path) => path === INVITE_ACCEPT_PATH,
+      async handle({ identity, req }) {
+        // Joining an org needs a sign-in (the token alone proves nothing about
+        // who is accepting) and an account that is already active: an org
+        // invitation never admits a pending sign-up.
+        requireSignIn(identity);
+        requireActive(identity);
+        if (acceptFailures.tooMany(identity.userId)) return [429, { error: "too many attempts; try again later" }];
+        const body = await readJsonBody(req);
+        try {
+          const joined = await store(orgInvites).accept(body && body.token, {
+            id: identity.userId,
+            email: identity.email,
+            emailVerified: identity.emailVerified,
+          });
+          acceptFailures.clear(identity.userId);
+          log?.info("org invite accepted", { orgId: joined.orgId, userId: identity.userId, role: joined.role });
+          return [200, joined];
+        } catch (error) {
+          if (error.status === 404 || error.status === 403) acceptFailures.add(identity.userId);
+          throw error;
+        }
+      },
+    },
+    {
       method: "DELETE",
       match: (path) => MEMBER_PATH.test(path),
       async handle({ identity, path }) {
@@ -419,7 +502,7 @@ function createUserApi({
   ];
 
   function matches(path) {
-    return path === PREFIX || path.startsWith(`${PREFIX}/`) || path === ORGS_PREFIX || path.startsWith(`${ORGS_PREFIX}/`);
+    return path === PREFIX || path.startsWith(`${PREFIX}/`) || path === ORGS_PREFIX || path.startsWith(`${ORGS_PREFIX}/`) || path === INVITE_ACCEPT_PATH;
   }
 
   // Returns true when the request was handled (always, for matching paths).
