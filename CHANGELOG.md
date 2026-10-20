@@ -48,6 +48,12 @@
   `GET /api/audit` on the admin port takes `userId`; rows carry `userId`; the
   panel shows the member and bans that user.
 
+- Org invitations: owners and admins invite an email address to an org with a
+  role (never `owner`) at `/api/orgs/:id/invites`; the single-use token, shown
+  once and stored as a hash, expires after 7 days and can be revoked. The
+  invitee accepts at `POST /api/invites/accept` with a sign-in whose address
+  is verified and matches. Accepting never activates a pending account.
+
 ### Changed
 
 - Tier is read from the org; setting a user's tier sets it on their personal
