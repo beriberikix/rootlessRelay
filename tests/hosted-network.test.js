@@ -618,6 +618,11 @@ test("audit log, usage, metrics and quota enforcement", NETWORK, async () => {
     assert.equal(auditRes.body.enabled, true);
     const verdicts = auditRes.body.rows.map((row) => `${row.dstIP}:${row.dstPort}=${row.verdict.split(":")[0]}`).sort();
     assert.deepEqual(verdicts, [`127.0.0.1:${sinkPort}=allow`, "169.254.169.254:80=deny"]);
+    assert.ok(auditRes.body.rows.every((row) => row.userId === created.body.id), "rows name the member who connected");
+    const byUser = await httpJson(relay.adminPort, { path: `/api/audit?userId=${created.body.id}`, cookie });
+    assert.equal(byUser.body.rows.length, auditRes.body.rows.length);
+    assert.equal((await httpJson(relay.adminPort, { path: `/api/audit?userId=${created.body.id + 1000}`, cookie })).body.rows.length, 0);
+    assert.equal((await httpJson(relay.adminPort, { path: "/api/audit?userId=abc", cookie })).status, 400);
     const allowed = auditRes.body.rows.find((row) => row.verdict.startsWith("allow"));
     assert.ok(allowed.endedAt, "allowed connection has an end time after the session closed");
     assert.equal((await httpJson(relay.adminPort, { path: "/api/audit?verdict=deny", cookie })).body.rows.length, 1);

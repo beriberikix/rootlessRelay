@@ -51,6 +51,7 @@ function createAuditLog({
     const entry = {
       key: row.key || null,
       owner: row.owner,
+      user_id: row.userId === undefined ? null : row.userId,
       session_id: row.sessionId,
       proto: row.proto,
       dst_ip: row.dstIP,
@@ -104,9 +105,9 @@ function createAuditLog({
         await db.transaction(async () => {
         for (const row of inserts) {
           const result = await db.run(
-            "INSERT INTO connections_audit (owner, session_id, proto, dst_ip, dst_port, verdict, bytes_in, bytes_out, started_at, ended_at) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [row.owner, row.session_id, row.proto, row.dst_ip, row.dst_port, row.verdict,
+            "INSERT INTO connections_audit (owner, user_id, session_id, proto, dst_ip, dst_port, verdict, bytes_in, bytes_out, started_at, ended_at) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [row.owner, row.user_id, row.session_id, row.proto, row.dst_ip, row.dst_port, row.verdict,
               row.bytes_in, row.bytes_out, row.started_at, row.ended_at],
           );
           if (row.key) inserted.set(row, { id: result.lastID, endedAt: row.ended_at });
@@ -153,7 +154,7 @@ function createAuditLog({
   // `at` (ms) with `windowMs` finds connections open at that moment, which is
   // what an abuse report gives: a destination and a time.
   async function query({
-    owner = null, sessionId = null, since = null, until = null, verdict = null, limit = 200,
+    owner = null, userId = null, sessionId = null, since = null, until = null, verdict = null, limit = 200,
     dstIP = null, dstPort = null, at = null, windowMs = 5 * 60 * 1000,
   } = {}) {
     const where = [];
@@ -183,6 +184,10 @@ function createAuditLog({
       where.push("owner = ?");
       params.push(owner);
     }
+    if (userId !== null) {
+      where.push("user_id = ?");
+      params.push(userId);
+    }
     if (sessionId) {
       where.push("session_id = ?");
       params.push(sessionId);
@@ -197,7 +202,7 @@ function createAuditLog({
     }
     if (verdict === "deny") where.push("verdict LIKE 'deny%'");
     else if (verdict === "allow") where.push("verdict LIKE 'allow%'");
-    const sql = "SELECT id, owner, session_id AS sessionId, proto, dst_ip AS dstIP, dst_port AS dstPort, verdict, " +
+    const sql = "SELECT id, owner, user_id AS userId, session_id AS sessionId, proto, dst_ip AS dstIP, dst_port AS dstPort, verdict, " +
       "bytes_in AS bytesIn, bytes_out AS bytesOut, started_at AS startedAt, ended_at AS endedAt FROM connections_audit" +
       (where.length ? ` WHERE ${where.join(" AND ")}` : "") +
       " ORDER BY started_at DESC, id DESC LIMIT ?";

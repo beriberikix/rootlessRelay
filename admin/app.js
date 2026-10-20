@@ -590,8 +590,14 @@ function createAdminApp({
       res.status(400).json({ error: "at must be an ISO timestamp, windowMinutes 0-1440, dstPort 1-65535" });
       return;
     }
+    const userId = req.query.userId ? parseId(req.query.userId) : null;
+    if (req.query.userId && !userId) {
+      res.status(400).json({ error: "userId must be a positive integer" });
+      return;
+    }
     const rows = await audit.query({
       owner: req.query.owner || null,
+      userId,
       sessionId: req.query.sessionId || null,
       verdict: req.query.verdict || null,
       dstIP: req.query.dstIp || null,

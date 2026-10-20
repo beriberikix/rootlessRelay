@@ -374,6 +374,7 @@ class SessionPolicy {
     if (this.audit && this.takeAuditSlot(session, "allow")) {
       this.audit.record({
         owner: this.identity.owner,
+        userId: this.identity.userId,
         sessionId: session.sessionId,
         proto: "tcp",
         dstIP,
@@ -556,6 +557,7 @@ class SessionPolicy {
     if (w.suppressedDeny === 0 && w.suppressedAllow === 0) return;
     this.audit.record({
       owner: this.identity.owner,
+      userId: this.identity.userId,
       sessionId: session.sessionId,
       proto: "summary",
       dstIP: "0.0.0.0",
@@ -601,6 +603,7 @@ class SessionPolicy {
     this.deniedAt.set(key, now);
     this.audit.record({
       owner: this.identity.owner,
+      userId: this.identity.userId,
       sessionId: session.sessionId,
       proto,
       dstIP,
