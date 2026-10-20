@@ -122,6 +122,7 @@ function sessionSummary(sessionId, session) {
     tier: identity.tier,
     kind: identity.kind,
     userId: identity.userId || null,
+    orgId: identity.orgId || null,
     username: identity.username || null,
     startedAt: session.startedAt ? new Date(session.startedAt).toISOString() : null,
     policy: session.policy ? session.policy.counters : null,
@@ -441,7 +442,7 @@ function createAdminApp({
     }
     await users.setStatus(id, status);
     let killed = 0;
-    if (status === "banned" && registry) killed = registry.killOwner(`user:${id}`, 1008, "account suspended");
+    if (status === "banned" && registry) killed = registry.killUser(id, 1008, "account suspended");
     log?.info("user status changed", { userId: id, status, killedSessions: killed, by: req.user.username });
     res.status(200).json({ ...publicUser(await users.findById(id)), killedSessions: killed });
   }
@@ -457,8 +458,16 @@ function createAdminApp({
       res.status(400).json({ error: "cannot delete yourself" });
       return;
     }
-    const killed = registry ? registry.killOwner(`user:${id}`, 1008, "account deleted") : 0;
-    await users.remove(id);
+    try {
+      await users.removeAccount(id);
+    } catch (error) {
+      if (error.status === 409) {
+        res.status(409).json({ error: error.code });
+        return;
+      }
+      throw error;
+    }
+    const killed = registry ? registry.killUser(id, 1008, "account deleted") : 0;
     log?.info("user deleted", { userId: id, username: user.username, killedSessions: killed, by: req.user.username });
     res.sendStatus(204);
   }));
@@ -610,9 +619,9 @@ function createAdminApp({
       quotaBytes: tier ? tier.quotaBytes : null,
       quotaPeriod: tier ? tier.quotaPeriod : null,
       currentPeriodBytes: usage
-        ? await usage.periodUsage({ identity: { userId: id, tier: user.tier, owner: `user:${id}` }, clientIP: null })
+        ? await usage.periodUsage({ identity: { orgId: user.default_org_id, tier: user.tier, owner: `org:${user.default_org_id}` }, clientIP: null })
         : null,
-      months: usage ? await usage.monthly(id) : [],
+      months: usage ? await usage.monthly(user.default_org_id) : [],
     });
   }));
 

@@ -247,7 +247,7 @@ test("tenant isolation: anon sessions cannot see each other; one account's sessi
     const macD = macFromNumber(13);
     const sessionC = await bringUp(relay, c.ws, macC, cookie);
     const sessionD = await bringUp(relay, d.ws, macD, cookie);
-    assert.equal(sessionC.owner, `user:${created.body.id}`);
+    assert.equal(sessionC.owner, `org:${created.body.defaultOrgId}`);
     assert.equal(sessionC.owner, sessionD.owner);
     assert.equal(sessionC.username, "pair");
     c.ws.send(buildARPRequest({ vmMAC: macC, vmIP: sessionC.vmIP, targetIP: sessionD.vmIP }));
@@ -433,7 +433,7 @@ test("operator flow: users, tokens, sessions list, kill, ban, rules disabled", N
     await delay(30);
     const sessions = await httpJson(relay.adminPort, { path: "/api/sessions", cookie });
     assert.equal(sessions.body.length, 1);
-    assert.equal(sessions.body[0].owner, `user:${created.body.id}`);
+    assert.equal(sessions.body[0].owner, `org:${created.body.defaultOrgId}`);
     assert.equal(sessions.body[0].username, "carol");
     assert.equal(sessions.body[0].tier, "user");
 
@@ -613,7 +613,7 @@ test("audit log, usage, metrics and quota enforcement", NETWORK, async () => {
     assert.equal((await openWebSocket(relay.wsPort, { token: tokenRes.body.token })).status, 429, "over quota is refused at upgrade");
 
     await delay(2500); // audit batch interval
-    const auditRes = await httpJson(relay.adminPort, { path: `/api/audit?owner=user:${created.body.id}`, cookie });
+    const auditRes = await httpJson(relay.adminPort, { path: `/api/audit?owner=org:${created.body.defaultOrgId}`, cookie });
     assert.equal(auditRes.status, 200);
     assert.equal(auditRes.body.enabled, true);
     const verdicts = auditRes.body.rows.map((row) => `${row.dstIP}:${row.dstPort}=${row.verdict.split(":")[0]}`).sort();

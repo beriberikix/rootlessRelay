@@ -2,11 +2,14 @@
 
 // Credentials for the data plane: per-user API tokens, short-lived anonymous
 // tokens, external OIDC JWTs, and the authenticator that maps any of them to
-// an Identity { kind, owner, tier, userId?, username? }.
+// an Identity { kind, owner, tier, orgId?, orgRole?, userId?, username? }.
+// For accounts, `owner` is the org ("org:<id>"): members of one org share a
+// private network, a tier and a usage quota.
 
 const crypto = require("crypto");
 const jose = require("jose");
 const { AuthError, LOCAL_IDENTITY } = require("../server/public");
+const { roleAllows } = require("./orgs");
 
 const API_TOKEN_PREFIX = "rr_";
 const ANON_ISSUER = "rootlessrelay-anon";
@@ -33,11 +36,14 @@ function parseApiToken(token) {
 
 function createApiTokenStore(db, { now = Date.now, randomBytes = crypto.randomBytes } = {}) {
   return {
-    async create({ userId, name = "default", expiresAt = null }) {
+    // A token belongs to an org (default: the creator's default org) and is
+    // minted by a user; sessions opened with it run as that org.
+    async create({ userId, orgId = null, name = "default", expiresAt = null }) {
       const generated = generateApiToken(randomBytes);
       const result = await db.run(
-        "INSERT INTO api_tokens (user_id, name, token_prefix, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-        [userId, String(name).slice(0, 64), generated.prefix, generated.hash, new Date(now()).toISOString(), expiresAt],
+        "INSERT INTO api_tokens (user_id, org_id, name, token_prefix, token_hash, created_at, expires_at) " +
+          "VALUES (?, COALESCE(?, (SELECT default_org_id FROM users WHERE id = ?)), ?, ?, ?, ?, ?)",
+        [userId, orgId, userId, String(name).slice(0, 64), generated.prefix, generated.hash, new Date(now()).toISOString(), expiresAt],
       );
       return { id: result.lastID, token: generated.token, prefix: generated.prefix, name, expiresAt };
     },
@@ -48,7 +54,8 @@ function createApiTokenStore(db, { now = Date.now, randomBytes = crypto.randomBy
       const parsed = parseApiToken(token);
       if (!parsed) return null;
       const rows = await db.all(
-        "SELECT t.*, u.id AS u_id, u.username AS u_username, u.role AS u_role, u.tier AS u_tier, u.status AS u_status " +
+        "SELECT t.*, u.id AS u_id, u.username AS u_username, u.role AS u_role, u.tier AS u_tier, u.status AS u_status, " +
+        "u.default_org_id AS u_default_org_id " +
         "FROM api_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_prefix = ?",
         [parsed.prefix],
       );
@@ -63,7 +70,17 @@ function createApiTokenStore(db, { now = Date.now, randomBytes = crypto.randomBy
         await db.run("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", [new Date(now()).toISOString(), row.id]);
         return {
           token: row,
-          user: { id: row.u_id, username: row.u_username, role: row.u_role, tier: row.u_tier, status: row.u_status },
+          user: {
+            id: row.u_id,
+            username: row.u_username,
+            role: row.u_role,
+            tier: row.u_tier,
+            status: row.u_status,
+            default_org_id: row.u_default_org_id,
+          },
+          // Tokens minted before orgs existed (or by a rolled-back release)
+          // have no org; they run as the creator's default org.
+          orgId: row.org_id || row.u_default_org_id || null,
         };
       }
       return null;
@@ -203,13 +220,15 @@ async function verifyTurnstile({ secret, token, ip, fetchFn = globalThis.fetch }
   return Boolean(result && result.success);
 }
 
-function identityForUser(user, via = null) {
+function identityFor({ user, org, role, via = null }) {
   return {
     kind: user.role === "operator" ? "operator" : "user",
-    owner: `user:${user.id}`,
+    owner: `org:${org.id}`,
+    orgId: org.id,
+    orgRole: role,
     userId: user.id,
     username: user.username,
-    tier: user.tier || (user.role === "operator" ? "operator" : "user"),
+    tier: org.tier || (user.role === "operator" ? "operator" : "user"),
     status: user.status || "active",
     via,
   };
@@ -224,7 +243,25 @@ function checkStatus(user, allowPending) {
   throw new AuthError(403, "account-suspended");
 }
 
-function createAuthenticator({ config, users, apiTokens, anon = null, jwt = null, log = null }) {
+// Resolves the org a user acts in and their role there. `allowPending` is the
+// account-API context (as opposed to opening a session): it lets pending
+// users, suspended orgs and roles that cannot open sessions through, so they
+// can still read their account.
+async function resolveOrg({ orgs, user, orgId, allowPending }) {
+  let org = null;
+  if (orgId) org = await orgs.findById(orgId);
+  if (!org) org = await orgs.ensurePersonalOrg(user.id);
+  if (!org) throw new AuthError(403, "no-organization");
+  const role = (await orgs.getMembership(org.id, user.id))?.role || null;
+  if (!role) throw new AuthError(403, "not-a-member");
+  if (!allowPending) {
+    if (org.status !== "active") throw new AuthError(403, "org-suspended");
+    if (!roleAllows(role, "session.open")) throw new AuthError(403, "role-cannot-open-sessions");
+  }
+  return { org, role };
+}
+
+function createAuthenticator({ config, users, apiTokens, orgs, anon = null, jwt = null, log = null }) {
   return async function authenticate(token, { clientIP, allowPending = false } = {}) {
     if (!token) {
       if (config.authRequired) throw new AuthError(401, "authentication-required");
@@ -236,7 +273,8 @@ function createAuthenticator({ config, users, apiTokens, anon = null, jwt = null
       if (!result) throw new AuthError(401, "invalid-token");
       if (!result.user) throw new AuthError(401, result.reason || "invalid-token");
       checkStatus(result.user, allowPending);
-      return { ...identityForUser(result.user, "api-token"), tokenId: result.token.id };
+      const { org, role } = await resolveOrg({ orgs, user: result.user, orgId: result.orgId, allowPending });
+      return { ...identityFor({ user: result.user, org, role, via: "api-token" }), tokenId: result.token.id };
     }
 
     let unverified;
@@ -261,7 +299,8 @@ function createAuthenticator({ config, users, apiTokens, anon = null, jwt = null
       });
       checkStatus(user, allowPending);
       await users.touchLogin(user.id);
-      return identityForUser(user, "jwt");
+      const { org, role } = await resolveOrg({ orgs, user, orgId: user.default_org_id, allowPending });
+      return identityFor({ user, org, role, via: "jwt" });
     }
 
     log?.warn("token from unknown issuer", { issuer: unverified.iss, clientIP });
@@ -278,7 +317,7 @@ module.exports = {
   createJwtVerifier,
   generateApiToken,
   hashToken,
-  identityForUser,
+  identityFor,
   parseApiToken,
   verifyTurnstile,
 };

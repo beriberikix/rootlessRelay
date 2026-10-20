@@ -11,6 +11,7 @@
 // leads to relay access is refused with 403 account-pending.
 
 const { AuthError, extractCredential, readJsonBody, writeJson } = require("./public");
+const { roleAllows } = require("../auth/orgs");
 
 const PREFIX = "/api/me";
 const MAX_ACTIVE_TOKENS = 20;
@@ -145,6 +146,7 @@ function createUserApi({
             lastLoginAt: user.lastLoginAt,
           } : { id: identity.userId, username: identity.username, tier: identity.tier, status: identity.status },
           tier: publicTier(identity.tier, tiers),
+          org: { id: identity.orgId, role: identity.orgRole },
           usage: await currentUsage(identity),
           activeSessions: ownSessions(identity).length,
         }];
@@ -162,8 +164,12 @@ function createUserApi({
         if (!body || body.confirm !== identity.username) {
           return [400, { error: "confirm must equal your username" }];
         }
-        const killed = registry ? registry.killOwner(identity.owner, 1008, "account deleted") : 0;
-        await store(users).remove(identity.userId);
+        // Refused (409 sole-owner) while the account solely owns an org that
+        // has other members; nothing is closed in that case.
+        // Orgs deleted with the account had no other member, so every session
+        // in them belongs to this user.
+        await store(users).removeAccount(identity.userId);
+        const killed = registry && registry.killUser ? registry.killUser(identity.userId, 1008, "account deleted") : 0;
         log?.info("account deleted by owner", { userId: identity.userId, killedSessions: killed });
         return [204, null];
       },
@@ -194,7 +200,7 @@ function createUserApi({
       method: "GET",
       match: (path) => path === `${PREFIX}/usage`,
       async handle({ identity }) {
-        const months = usage ? await usage.monthly(identity.userId, { months: 12 }) : [];
+        const months = usage ? await usage.monthly(identity.orgId, { months: 12 }) : [];
         return [200, { current: await currentUsage(identity), months }];
       },
     },
@@ -202,6 +208,7 @@ function createUserApi({
       method: "GET",
       match: (path) => path === `${PREFIX}/sessions`,
       async handle({ identity }) {
+        if (!roleAllows(identity.orgRole, "session.list")) return [403, { error: "forbidden" }];
         return [200, ownSessions(identity)];
       },
     },
@@ -219,6 +226,9 @@ function createUserApi({
         if (!session || !session.identity || session.identity.owner !== identity.owner) {
           return [404, { error: "session not found" }];
         }
+        // Members close their own sessions; owners and admins close any in the org.
+        const own = session.identity.userId === identity.userId && roleAllows(identity.orgRole, "session.close.own");
+        if (!own && !roleAllows(identity.orgRole, "session.close.any")) return [403, { error: "forbidden" }];
         registry.kill(sessionId, 1008, "terminated by account owner");
         log?.info("session killed by owner", { sessionId, owner: identity.owner });
         return [204, null];
@@ -237,6 +247,7 @@ function createUserApi({
       async handle({ identity, req }) {
         requireActive(identity);
         requireSignIn(identity);
+        if (!roleAllows(identity.orgRole, "token.create")) return [403, { error: "forbidden" }];
         const body = await readJsonBody(req);
         const name = typeof body.name === "string" && body.name.trim() ? body.name.trim().slice(0, 64) : "default";
         let expiresAt = null;
@@ -253,7 +264,7 @@ function createUserApi({
         if (active.length >= MAX_ACTIVE_TOKENS) {
           return [409, { error: `at most ${MAX_ACTIVE_TOKENS} active tokens per account` }];
         }
-        const created = await tokenStore.create({ userId: identity.userId, name, expiresAt });
+        const created = await tokenStore.create({ userId: identity.userId, orgId: identity.orgId, name, expiresAt });
         log?.info("api token created by owner", { userId: identity.userId, tokenId: created.id });
         return [201, created];
       },

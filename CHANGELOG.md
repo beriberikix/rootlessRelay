@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Added (fork: organizations)
+
+- Organizations own the private network, API tokens, tier and usage; users
+  belong to them through memberships with a role (`owner`, `admin`, `member`,
+  `billing`, `read_only`). Every user has a personal org, created on first
+  sight and by migration 4 for existing accounts. Design:
+  relaynet `docs/design/orgs-teams-roles.md`.
+- `auth/orgs.js`: `authorize(principal, action, orgId)` backed by one
+  permission matrix, and membership changes that keep an org's last owner,
+  stop admins touching owners and stop anyone editing their own role.
+- Session identity is the org: `owner` is `org:<id>`, so members of an org
+  share a private network, session cap, tier and monthly quota. Sessions of a
+  member whose role cannot open sessions (`billing`, `read_only`) or whose org
+  is suspended are refused; the account API still answers them.
+- `GET /api/me` reports `org: { id, role }`. Session lists and closing,
+  and token creation, follow the caller's role in the org.
+- Deleting an account removes orgs it alone belongs to; it is refused with
+  409 `sole-owner` while the account solely owns an org that has other members.
+- Migration 4 is additive (`orgs`, `memberships`, `org_invites`, `teams`,
+  `team_members`, `org_usage_monthly`, `users.default_org_id`,
+  `api_tokens.org_id`). The previous release still starts on a migrated
+  database; usage it records goes to the old `usage_monthly`, and accounts and
+  tokens it creates get their org on first use.
+- Audit rows are keyed by org. A lookup by `org:<id>` also returns a personal
+  org's earlier `user:<id>` rows. The operator panel maps both forms.
+
+### Changed
+
+- Tier is read from the org; setting a user's tier sets it on their personal
+  org too. Bans and account deletion close sessions by user (`killUser`), not
+  by owner.
+
 ### Added (fork: hosted multi-user mode)
 
 - `RELAY_MODE=hosted` turns the relay into a multi-user service while the

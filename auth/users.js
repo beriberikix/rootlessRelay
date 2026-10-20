@@ -4,6 +4,7 @@
 // with a local password or linked to an external identity provider.
 
 const bcrypt = require("bcryptjs");
+const { ensurePersonalOrg, removeUserAndOrgs } = require("./orgs");
 
 const ROLES = new Set(["user", "operator"]);
 const STATUSES = new Set(["active", "pending", "banned"]);
@@ -22,6 +23,7 @@ function publicUser(row) {
     tier: row.tier,
     status: row.status,
     externalSub: row.external_sub || null,
+    defaultOrgId: row.default_org_id || null,
     hasPassword: Boolean(row.password_hash),
     createdAt: row.created_at,
     lastLoginAt: row.last_login_at || null,
@@ -73,13 +75,19 @@ function createUserStore(db, { bcryptRounds = 12, now = Date.now } = {}) {
         "INSERT INTO users (username, password_hash, role, tier, status, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         [username, passwordHash, role, resolvedTier, status, nowIso(now)],
       );
+      await ensurePersonalOrg(db, result.lastID, { now });
       return this.findById(result.lastID);
     },
 
     // External identity providers create users on first sight.
     async upsertExternal({ externalSub, username, tier = "user", status = "active" }) {
       const existing = await this.findByExternalSub(externalSub);
-      if (existing) return existing;
+      if (existing) {
+        // Accounts created before orgs existed (or by a rolled-back release)
+        // get their personal org on first sight.
+        if (!existing.default_org_id) await ensurePersonalOrg(db, existing.id, { now });
+        return existing.default_org_id ? existing : this.findById(existing.id);
+      }
       let candidate = username && USERNAME_RE.test(username) ? username : externalSub.slice(0, 120);
       if (await findRowByUsername(candidate)) {
         candidate = `${candidate.slice(0, 100)}#${externalSub.slice(-8)}`;
@@ -90,7 +98,9 @@ function createUserStore(db, { bcryptRounds = 12, now = Date.now } = {}) {
           "ON CONFLICT(external_sub) DO NOTHING",
         [candidate, tier, status, externalSub, nowIso(now)],
       );
-      return this.findByExternalSub(externalSub);
+      const user = await this.findByExternalSub(externalSub);
+      await ensurePersonalOrg(db, user.id, { now });
+      return this.findById(user.id);
     },
 
     async setStatus(id, status) {
@@ -114,6 +124,8 @@ function createUserStore(db, { bcryptRounds = 12, now = Date.now } = {}) {
     async setTier(id, tier) {
       if (typeof tier !== "string" || !tier) throw new RangeError("tier is required");
       const result = await db.run("UPDATE users SET tier = ? WHERE id = ?", [tier, id]);
+      // The tier lives on the org; the user's personal org follows it.
+      await db.run("UPDATE orgs SET tier = ? WHERE id = (SELECT default_org_id FROM users WHERE id = ?)", [tier, id]);
       return result.changes > 0;
     },
 
@@ -135,14 +147,17 @@ function createUserStore(db, { bcryptRounds = 12, now = Date.now } = {}) {
       return bcrypt.compare(password, user.password_hash);
     },
 
-    // Deletes the account, its API tokens (cascade) and its usage rows. The
-    // connection audit is keyed by owner and ages out on its own retention.
-    // Not wrapped in db.transaction: it shares the connection with the usage
-    // flush, and the order makes a partial delete harmless.
+    // Deletes the account, its API tokens (cascade) and what only it holds:
+    // orgs it is the sole member of go with it, with their usage. An org it
+    // solely owns but shares with others blocks the deletion (OrgError 409
+    // sole-owner). The connection audit is keyed by owner and ages out on its
+    // own retention. Returns { removed, deletedOrgIds }.
+    async removeAccount(id) {
+      return removeUserAndOrgs(db, id);
+    },
+
     async remove(id) {
-      const result = await db.run("DELETE FROM users WHERE id = ?", [id]);
-      await db.run("DELETE FROM usage_monthly WHERE user_id = ?", [id]);
-      return result.changes > 0;
+      return (await this.removeAccount(id)).removed;
     },
   };
 }

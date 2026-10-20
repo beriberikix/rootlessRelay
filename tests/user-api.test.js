@@ -9,6 +9,7 @@ const { MAX_ACTIVE_TOKENS, createUserApi, publicTier } = require("../server/user
 const { openDatabase } = require("../auth/db");
 const { createUserStore } = require("../auth/users");
 const { createApiTokenStore, createAuthenticator } = require("../auth/tokens");
+const { createOrgStore } = require("../auth/orgs");
 const { createInviteStore } = require("../auth/invites");
 const { resolveTiers } = require("../policy/tiers");
 
@@ -37,10 +38,10 @@ function request(port, { method = "GET", path = "/", headers = {}, body = null }
   });
 }
 
-function fakeSession({ owner, clientIP = "10.1.1.1", bytesSent = 0 }) {
+function fakeSession({ owner, userId = null, clientIP = "10.1.1.1", bytesSent = 0 }) {
   const closed = [];
   return {
-    identity: { owner },
+    identity: { owner, userId },
     clientIP,
     vmIP: "10.0.2.15",
     bytesSent,
@@ -73,7 +74,8 @@ async function startServer({ env = {}, usage = null, wrapAuthenticate = signedIn
   const users = createUserStore(db, { bcryptRounds: 4 });
   const apiTokens = createApiTokenStore(db);
   const invites = createInviteStore(db);
-  const authenticate = wrapAuthenticate(createAuthenticator({ config, users, apiTokens, log: quietLog }));
+  const orgs = createOrgStore(db);
+  const authenticate = wrapAuthenticate(createAuthenticator({ config, users, apiTokens, orgs, log: quietLog }));
 
   const activeSessions = new Map();
   const registry = {
@@ -87,6 +89,16 @@ async function startServer({ env = {}, usage = null, wrapAuthenticate = signedIn
       let killed = 0;
       activeSessions.forEach((session) => {
         if (session.identity.tokenId === tokenId) {
+          session.ws.close(code, reason);
+          killed += 1;
+        }
+      });
+      return killed;
+    },
+    killUser(userId, code, reason) {
+      let killed = 0;
+      activeSessions.forEach((session) => {
+        if (session.identity.userId === userId) {
           session.ws.close(code, reason);
           killed += 1;
         }
@@ -125,7 +137,7 @@ async function startServer({ env = {}, usage = null, wrapAuthenticate = signedIn
     userApi,
   });
   const address = await server.listen(0, "127.0.0.1");
-  return { server, port: address.port, db, users, apiTokens, invites, activeSessions, tiers };
+  return { server, port: address.port, db, users, orgs, apiTokens, invites, activeSessions, tiers };
 }
 
 test("public tier view exposes only user-facing limits", () => {
@@ -171,8 +183,8 @@ test("sessions are scoped to the owner and only the owner can kill them", async 
     const bob = await users.create({ username: "bob", role: "user" });
     const aliceToken = (await apiTokens.create({ userId: alice.id })).token;
     const bobToken = (await apiTokens.create({ userId: bob.id })).token;
-    const mine = fakeSession({ owner: `user:${alice.id}`, bytesSent: 42 });
-    const theirs = fakeSession({ owner: `user:${bob.id}` });
+    const mine = fakeSession({ owner: `org:${alice.default_org_id}`, userId: alice.id, bytesSent: 42 });
+    const theirs = fakeSession({ owner: `org:${bob.default_org_id}`, userId: bob.id });
     activeSessions.set("s-alice", mine);
     activeSessions.set("s-bob", theirs);
 
@@ -228,8 +240,8 @@ test("token self-service: create with expiry, list, revoke only your own, cap on
     assert.ok(list.json().every((t) => t.token === undefined), "secrets are never listed");
 
     assert.equal((await request(port, { method: "DELETE", path: `/api/me/tokens/${bobOwned.id}`, headers: auth })).status, 404);
-    const viaLaptop = { ...fakeSession({ owner: `user:${alice.id}` }) };
-    viaLaptop.identity = { owner: `user:${alice.id}`, tokenId: token.id };
+    const viaLaptop = { ...fakeSession({ owner: `org:${alice.default_org_id}`, userId: alice.id }) };
+    viaLaptop.identity = { owner: `org:${alice.default_org_id}`, userId: alice.id, tokenId: token.id };
     activeSessions.set("s-laptop", viaLaptop);
     assert.equal((await request(port, { method: "DELETE", path: `/api/me/tokens/${token.id}`, headers: auth })).status, 204);
     assert.deepEqual(viaLaptop.closed, [{ code: 1008, reason: "token revoked" }], "revoking closes its sessions");
@@ -354,7 +366,7 @@ test("account deletion needs a sign-in and the username typed back", async () =>
   try {
     const gina = await users.create({ username: "gina" });
     const token = (await apiTokens.create({ userId: gina.id })).token;
-    const session = fakeSession({ owner: `user:${gina.id}` });
+    const session = fakeSession({ owner: `org:${gina.default_org_id}`, userId: gina.id });
     activeSessions.set("s-gina", session);
 
     const viaToken = await request(port, { method: "DELETE", path: "/api/me", headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify({ confirm: "gina" }) });
@@ -371,6 +383,81 @@ test("account deletion needs a sign-in and the username typed back", async () =>
     const op = await users.create({ username: "ops", role: "operator" });
     const opToken = (await apiTokens.create({ userId: op.id })).token;
     assert.equal((await request(port, { method: "DELETE", path: "/api/me", headers: { Authorization: `Bearer jwt:${opToken}` }, body: JSON.stringify({ confirm: "ops" }) })).status, 403);
+  } finally {
+    await server.close();
+  }
+});
+
+test("roles gate sessions and tokens inside a shared org", async () => {
+  const { server, port, users, orgs, apiTokens, activeSessions } = await startServer();
+  try {
+    const owner = await users.create({ username: "owner" });
+    const admin = await users.create({ username: "admin" });
+    const member = await users.create({ username: "member" });
+    const viewer = await users.create({ username: "viewer" });
+    const biller = await users.create({ username: "biller" });
+    const team = await orgs.create({ name: "team", ownerUserId: owner.id });
+    await orgs.addMember({ orgId: team.id, userId: admin.id, role: "admin" });
+    await orgs.addMember({ orgId: team.id, userId: member.id, role: "member" });
+    await orgs.addMember({ orgId: team.id, userId: viewer.id, role: "read_only" });
+    await orgs.addMember({ orgId: team.id, userId: biller.id, role: "billing" });
+    const token = async (user) => (await apiTokens.create({ userId: user.id, orgId: team.id })).token;
+    const auth = (t, signedIn = false) => ({ Authorization: `Bearer ${signedIn ? "jwt:" : ""}${t}`, "Content-Type": "application/json" });
+
+    const sessions = {
+      owner: fakeSession({ owner: `org:${team.id}`, userId: owner.id }),
+      member: fakeSession({ owner: `org:${team.id}`, userId: member.id }),
+    };
+    activeSessions.set("s-owner", sessions.owner);
+    activeSessions.set("s-member", sessions.member);
+
+    // Everyone who may read the org sees all its sessions; billing does not.
+    const viewerToken = await token(viewer);
+    const billerToken = await token(biller);
+    const listed = await request(port, { path: "/api/me/sessions", headers: auth(viewerToken) });
+    assert.deepEqual(listed.json().map((s) => s.sessionId).sort(), ["s-member", "s-owner"]);
+    assert.equal((await request(port, { path: "/api/me/sessions", headers: auth(billerToken) })).status, 403);
+    assert.equal((await request(port, { path: "/api/me", headers: auth(billerToken) })).json().org.role, "billing");
+    assert.equal((await request(port, { path: "/api/me/usage", headers: auth(billerToken) })).status, 200);
+
+    // A member closes their own session, not a colleague's; an admin closes any; read-only none.
+    const memberToken = await token(member);
+    assert.equal((await request(port, { method: "DELETE", path: "/api/me/sessions/s-owner", headers: auth(memberToken) })).status, 403);
+    assert.equal(sessions.owner.closed.length, 0);
+    assert.equal((await request(port, { method: "DELETE", path: "/api/me/sessions/s-member", headers: auth(viewerToken) })).status, 403);
+    assert.equal((await request(port, { method: "DELETE", path: "/api/me/sessions/s-member", headers: auth(memberToken) })).status, 204);
+    assert.equal((await request(port, { method: "DELETE", path: "/api/me/sessions/s-owner", headers: auth(await token(admin)) })).status, 204);
+
+    // Only roles that open sessions mint tokens, and the token belongs to the caller's org.
+    const create = (user, signedInToken) => request(port, { method: "POST", path: "/api/me/tokens", headers: auth(signedInToken, true), body: JSON.stringify({ name: "ci" }) });
+    assert.equal((await create(viewer, viewerToken)).status, 403);
+    assert.equal((await create(biller, billerToken)).status, 403);
+    const made = await create(member, memberToken);
+    assert.equal(made.status, 201);
+    const row = await apiTokens.verify(made.json().token);
+    assert.equal(row.orgId, team.id);
+    assert.equal(row.user.id, member.id);
+  } finally {
+    await server.close();
+  }
+});
+
+test("deleting an account that solely owns a shared org is refused", async () => {
+  const { server, port, users, orgs, apiTokens, activeSessions } = await startServer();
+  try {
+    const owner = await users.create({ username: "owner" });
+    const member = await users.create({ username: "member" });
+    const team = await orgs.create({ name: "team", ownerUserId: owner.id });
+    await orgs.addMember({ orgId: team.id, userId: member.id, role: "member" });
+    const token = (await apiTokens.create({ userId: owner.id })).token;
+    const session = fakeSession({ owner: `org:${owner.default_org_id}`, userId: owner.id });
+    activeSessions.set("s-owner", session);
+    const headers = { Authorization: `Bearer jwt:${token}`, "Content-Type": "application/json" };
+    const refused = await request(port, { method: "DELETE", path: "/api/me", headers, body: JSON.stringify({ confirm: "owner" }) });
+    assert.equal(refused.status, 409);
+    assert.equal(refused.json().error, "sole-owner");
+    assert.equal(session.closed.length, 0, "nothing is closed when the delete is refused");
+    assert.ok(await users.findById(owner.id));
   } finally {
     await server.close();
   }

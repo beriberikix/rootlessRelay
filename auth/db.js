@@ -125,6 +125,89 @@ const MIGRATIONS = [
       await db.exec("CREATE INDEX IF NOT EXISTS connections_audit_dst_started ON connections_audit(dst_ip, started_at)");
     },
   },
+  {
+    // Organizations own networks, tokens, tier and usage; users belong to them
+    // through memberships. Additive: users, api_tokens and usage_monthly keep
+    // their shape so the previous release still starts on this database (it
+    // ignores the new tables and columns; usage it records lands in the old
+    // table). Every existing user gets a personal org, owned by them, that
+    // carries their tier, their tokens and their usage history.
+    version: 4,
+    async up(db) {
+      await db.exec(`
+        CREATE TABLE orgs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          personal INTEGER NOT NULL DEFAULT 0,
+          tier TEXT NOT NULL DEFAULT 'user',
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE memberships (
+          org_id INTEGER NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member', 'billing', 'read_only')),
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (org_id, user_id)
+        );
+        CREATE INDEX memberships_user ON memberships(user_id);
+        CREATE TABLE org_invites (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          org_id INTEGER NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+          email TEXT NOT NULL,
+          role TEXT NOT NULL CHECK (role IN ('admin', 'member', 'billing', 'read_only')),
+          token_hash TEXT NOT NULL UNIQUE,
+          created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          accepted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          accepted_at TEXT,
+          revoked_at TEXT
+        );
+        CREATE TABLE teams (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          org_id INTEGER NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          UNIQUE (org_id, name)
+        );
+        CREATE TABLE team_members (
+          team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          PRIMARY KEY (team_id, user_id)
+        );
+        CREATE TABLE org_usage_monthly (
+          org_id INTEGER NOT NULL,
+          month TEXT NOT NULL,
+          bytes_in INTEGER NOT NULL DEFAULT 0,
+          bytes_out INTEGER NOT NULL DEFAULT 0,
+          sessions INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (org_id, month)
+        );
+        ALTER TABLE users ADD COLUMN default_org_id INTEGER REFERENCES orgs(id);
+        ALTER TABLE api_tokens ADD COLUMN org_id INTEGER REFERENCES orgs(id);
+      `);
+
+      const stamp = new Date().toISOString();
+      const rows = await db.all("SELECT id, username, tier FROM users ORDER BY id");
+      for (const user of rows) {
+        const org = await db.run(
+          "INSERT INTO orgs (name, personal, tier, status, created_at) VALUES (?, 1, ?, 'active', ?)",
+          [user.username, user.tier, stamp],
+        );
+        await db.run(
+          "INSERT INTO memberships (org_id, user_id, role, created_at) VALUES (?, ?, 'owner', ?)",
+          [org.lastID, user.id, stamp],
+        );
+        await db.run("UPDATE users SET default_org_id = ? WHERE id = ?", [org.lastID, user.id]);
+      }
+      await db.run("UPDATE api_tokens SET org_id = (SELECT default_org_id FROM users WHERE users.id = api_tokens.user_id)");
+      await db.run(
+        "INSERT INTO org_usage_monthly (org_id, month, bytes_in, bytes_out, sessions) " +
+          "SELECT u.default_org_id, m.month, m.bytes_in, m.bytes_out, m.sessions " +
+          "FROM usage_monthly m JOIN users u ON u.id = m.user_id WHERE u.default_org_id IS NOT NULL",
+      );
+    },
+  },
 ];
 
 // All access shares one sqlite3 connection, where a transaction is
