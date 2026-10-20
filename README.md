@@ -316,6 +316,15 @@ caller is not in, or one that does not exist, is `403 not-a-member`.
 | `PATCH /api/orgs/:id/members/:userId` | Change a role: `{ "role" }`. Owners and admins; only owners grant or change `owner`; nobody changes their own role. A role that cannot open sessions (`billing`, `read_only`) ends the member's live sessions. |
 | `DELETE /api/orgs/:id/members/:userId` | Remove a member, or leave (own id). Revokes the member's tokens in the org and closes their sessions. The last owner cannot go (409 `last-owner`). |
 
+| `GET /api/orgs/:id/invites` | Invitations of the org with their state (`open`, `accepted`, `revoked`, `expired`); never the tokens. Owners and admins. |
+| `POST /api/orgs/:id/invites` | Invite an address: `{ "email", "role" }`, role one of `admin`, `member`, `billing`, `read_only` (never `owner`). Returns the token once; hand it to the invitee, the relay sends no email. Inviting an address again replaces its open invitation. Expires after 7 days. Needs a sign-in. |
+| `DELETE /api/orgs/:id/invites/:inviteId` | Revoke an open invitation. Needs a sign-in. |
+| `POST /api/invites/accept` | Join an org: `{ "token" }`. Needs a sign-in as an active account whose address is verified (`JWT_VERIFIED_CLAIM`) and matches the invited one (case-insensitive). An unknown, used, revoked or expired token is `404 invite-invalid`; `403 invite-email-mismatch` / `email-not-verified`; `409 already-member`. 10 failures per hour per account, then 429. |
+
+An org invitation adds an active account to an org; it never activates a
+pending sign-up (`SIGNUP_MODE=invite` still needs an operator code first). It
+does not change the account's default org, and it cannot grant `owner`.
+
 Roles: `owner`, `admin`, `member`, `billing`, `read_only`. The permission
 matrix is in `auth/orgs.js` (`PERMISSIONS`) and mirrored in
 `tests/orgs.test.js`.

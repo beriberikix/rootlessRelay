@@ -47,12 +47,16 @@
   where unambiguous (`user:<id>` rows, and `org:<id>` rows of a personal org).
   `GET /api/audit` on the admin port takes `userId`; rows carry `userId`; the
   panel shows the member and bans that user.
-
 - `scripts/check-migration.js <db>` rehearses the schema migrations on a copy
   of a database (a restored backup) and checks what must survive: users,
   tokens and usage totals, one personal org per user with matching tier,
   token and audit attribution, integrity and foreign keys, and that a second
   run changes nothing. It prints counts only and exits 1 on any failure.
+- Org invitations: owners and admins invite an email address to an org with a
+  role (never `owner`) at `/api/orgs/:id/invites`; the single-use token, shown
+  once and stored as a hash, expires after 7 days and can be revoked. The
+  invitee accepts at `POST /api/invites/accept` with a sign-in whose address
+  is verified and matches. Accepting never activates a pending account.
 
 ### Changed
 

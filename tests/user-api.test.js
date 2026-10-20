@@ -10,6 +10,7 @@ const { openDatabase } = require("../auth/db");
 const { createUserStore } = require("../auth/users");
 const { createApiTokenStore, createAuthenticator } = require("../auth/tokens");
 const { createOrgStore } = require("../auth/orgs");
+const { createOrgInviteStore } = require("../auth/org_invites");
 const { createInviteStore } = require("../auth/invites");
 const { resolveTiers } = require("../policy/tiers");
 
@@ -75,6 +76,7 @@ async function startServer({ env = {}, usage = null, wrapAuthenticate = signedIn
   const apiTokens = createApiTokenStore(db);
   const invites = createInviteStore(db);
   const orgs = createOrgStore(db);
+  const orgInvites = createOrgInviteStore(db, { orgs });
   const authenticate = wrapAuthenticate(createAuthenticator({ config, users, apiTokens, orgs, log: quietLog }));
 
   const activeSessions = new Map();
@@ -132,6 +134,7 @@ async function startServer({ env = {}, usage = null, wrapAuthenticate = signedIn
     users: () => users,
     apiTokens,
     orgs,
+    orgInvites,
     invites,
     usage,
     registry,
@@ -148,7 +151,7 @@ async function startServer({ env = {}, usage = null, wrapAuthenticate = signedIn
     userApi,
   });
   const address = await server.listen(0, "127.0.0.1");
-  return { server, port: address.port, db, users, orgs, apiTokens, invites, activeSessions, tiers };
+  return { server, port: address.port, db, users, orgs, orgInvites, apiTokens, invites, activeSessions, tiers };
 }
 
 test("public tier view exposes only user-facing limits", () => {
@@ -575,6 +578,102 @@ test("a token stays in its org; naming another is refused; a bad org id is a 400
     assert.equal((await get({ "X-Relay-Org": "abc" })).status, 400);
     assert.equal((await get({ "X-Relay-Org": "0" })).status, 400);
     assert.equal((await get({ "X-Relay-Org": "1; drop" })).status, 400);
+  } finally {
+    await server.close();
+  }
+});
+
+// A signed-in identity whose address the IdP vouches for (or not), by username.
+const withEmails = (emails, verifiedFor) => (fn) => signedIn(async (token, ctx) => {
+  const identity = await fn(token, ctx);
+  return { ...identity, email: emails[identity.username] || null, emailVerified: verifiedFor.has(identity.username) };
+});
+
+test("org invitations: managers invite, invitees accept with a verified matching address", async () => {
+  const emails = { dana: "dana@example.com", eve: "eve@example.com", fay: "fay@example.com" };
+  const { server, port, users, orgs, apiTokens } = await startServer({
+    wrapAuthenticate: withEmails(emails, new Set(["dana", "eve"])),
+  });
+  try {
+    const owner = await users.create({ username: "owner" });
+    const member = await users.create({ username: "member" });
+    const dana = await users.create({ username: "dana" });
+    const eve = await users.create({ username: "eve" });
+    const fay = await users.create({ username: "fay" }); // address not verified
+    const pending = await users.create({ username: "pending", status: "pending" });
+    const stranger = await users.create({ username: "stranger" });
+    const team = await orgs.create({ name: "team", ownerUserId: owner.id });
+    await orgs.addMember({ orgId: team.id, userId: member.id, role: "member" });
+    emails.pending = "pending@example.com";
+    const call = async (user, method, path, body, { signedInAs = true } = {}) => {
+      const t = (await apiTokens.create({ userId: user.id })).token;
+      return request(port, {
+        method, path,
+        headers: { Authorization: `Bearer ${signedInAs ? "jwt:" : ""}${t}`, "Content-Type": "application/json" },
+        body: body === undefined ? null : JSON.stringify(body),
+      });
+    };
+    const base = `/api/orgs/${team.id}/invites`;
+
+    // Who may invite, and what.
+    assert.equal((await call(member, "POST", base, { email: "dana@example.com", role: "member" })).status, 403);
+    assert.equal((await call(stranger, "POST", base, { email: "dana@example.com", role: "member" })).status, 404);
+    assert.equal((await call(stranger, "GET", base)).status, 404);
+    assert.equal((await call(owner, "POST", base, { email: "dana@example.com", role: "member" }, { signedInAs: false })).status, 403, "needs a sign-in");
+    assert.equal((await call(owner, "POST", base, { email: "dana@example.com", role: "owner" })).status, 400);
+    assert.equal((await call(owner, "POST", base, { email: "not-an-address", role: "member" })).status, 400);
+    const made = await call(owner, "POST", base, { email: "dana@example.com", role: "read_only" });
+    assert.equal(made.status, 201);
+    const token = made.json().token;
+    assert.match(token, /^oi_/);
+    const listed = (await call(owner, "GET", base)).json();
+    assert.deepEqual(listed.map((i) => [i.email, i.role, i.state]), [["dana@example.com", "read_only", "open"]]);
+    assert.equal(JSON.stringify(listed).includes(token), false, "tokens are never listed");
+    assert.equal((await call(member, "GET", base)).status, 403);
+
+    const accept = (user, tok, opts) => call(user, "POST", "/api/invites/accept", { token: tok }, opts);
+    // Not for API tokens, pending accounts, other addresses, or unverified ones.
+    assert.equal((await accept(dana, token, { signedInAs: false })).status, 403);
+    assert.equal((await accept(pending, token)).json().error, "account-pending");
+    assert.equal((await accept(eve, token)).json().error, "invite-email-mismatch");
+    assert.equal((await accept(fay, (await call(owner, "POST", base, { email: "fay@example.com", role: "member" })).json().token)).json().error, "email-not-verified");
+    assert.equal((await accept(dana, "oi_wrong")).json().error, "invite-invalid");
+    assert.equal((await orgs.getMembership(team.id, pending.id)), null);
+    assert.equal((await users.findById(pending.id)).status, "pending", "an org invitation never activates a pending account");
+
+    // The right person joins; the token works once.
+    const joined = await accept(dana, token);
+    assert.equal(joined.status, 200);
+    assert.deepEqual(joined.json(), { orgId: team.id, role: "read_only" });
+    assert.equal((await accept(dana, token)).json().error, "invite-invalid");
+    const mine = (await call(dana, "GET", "/api/me/orgs")).json();
+    assert.deepEqual(mine.map((o) => [o.personal, o.role]), [[true, "owner"], [false, "read_only"]]);
+
+    // Revoking stops an open invitation; unknown ids are 404.
+    const open = (await call(owner, "POST", base, { email: "eve@example.com", role: "member" })).json();
+    assert.equal((await call(member, "DELETE", `${base}/${open.id}`)).status, 403);
+    assert.equal((await call(owner, "DELETE", `${base}/${open.id}`)).status, 204);
+    assert.equal((await call(owner, "DELETE", `${base}/${open.id}`)).status, 404);
+    assert.equal((await accept(eve, open.token)).json().error, "invite-invalid");
+    const otherOrg = await orgs.create({ name: "other", ownerUserId: owner.id });
+    assert.equal((await call(owner, "DELETE", `/api/orgs/${otherOrg.id}/invites/${open.id}`)).status, 404, "another org's invitation id");
+  } finally {
+    await server.close();
+  }
+});
+
+test("accepting is rate limited per account after repeated failures", async () => {
+  const { server, port, users, apiTokens } = await startServer({ wrapAuthenticate: withEmails({ dana: "dana@example.com" }, new Set(["dana"])) });
+  try {
+    const dana = await users.create({ username: "dana" });
+    const t = (await apiTokens.create({ userId: dana.id })).token;
+    const guess = () => request(port, {
+      method: "POST", path: "/api/invites/accept",
+      headers: { Authorization: `Bearer jwt:${t}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ token: "oi_guess" }),
+    });
+    for (let i = 0; i < 10; i += 1) assert.equal((await guess()).status, 404);
+    assert.equal((await guess()).status, 429);
   } finally {
     await server.close();
   }
