@@ -39,10 +39,10 @@ function request(port, { method = "GET", path = "/", headers = {}, body = null }
   });
 }
 
-function fakeSession({ owner, userId = null, clientIP = "10.1.1.1", bytesSent = 0 }) {
+function fakeSession({ owner, userId = null, username = null, clientIP = "10.1.1.1", bytesSent = 0 }) {
   const closed = [];
   return {
-    identity: { owner, userId },
+    identity: { owner, userId, username },
     clientIP,
     vmIP: "10.0.2.15",
     bytesSent,
@@ -674,6 +674,60 @@ test("accepting is rate limited per account after repeated failures", async () =
     });
     for (let i = 0; i < 10; i += 1) assert.equal((await guess()).status, 404);
     assert.equal((await guess()).status, 429);
+  } finally {
+    await server.close();
+  }
+});
+
+test("the session list says whose session it is and whether the caller may close it, and DELETE agrees", async () => {
+  const { server, port, users, orgs, apiTokens, activeSessions } = await startServer();
+  try {
+    const owner = await users.create({ username: "owner@example.test" });
+    const admin = await users.create({ username: "admin@example.test" });
+    const member = await users.create({ username: "member@example.test" });
+    const viewer = await users.create({ username: "viewer@example.test" });
+    const team = await orgs.create({ name: "team", ownerUserId: owner.id });
+    await orgs.addMember({ orgId: team.id, userId: admin.id, role: "admin" });
+    await orgs.addMember({ orgId: team.id, userId: member.id, role: "member" });
+    await orgs.addMember({ orgId: team.id, userId: viewer.id, role: "read_only" });
+    const sessionOf = (user) => fakeSession({ owner: `org:${team.id}`, userId: user.id, username: user.username });
+    const open = () => {
+      activeSessions.clear();
+      activeSessions.set("s-owner", sessionOf(owner));
+      activeSessions.set("s-member", sessionOf(member));
+    };
+    open();
+    const tokenFor = async (user) => (await apiTokens.create({ userId: user.id, orgId: team.id })).token;
+    const auth = (t) => ({ Authorization: `Bearer ${t}` });
+    const view = async (user) => Object.fromEntries((await request(port, { path: "/api/me/sessions", headers: auth(await tokenFor(user)) })).json()
+      .map((s) => [s.sessionId, { username: s.username, own: s.own, canClose: s.canClose }]));
+
+    // Everyone who can list sessions is told who opened each one.
+    assert.deepEqual(await view(member), {
+      "s-owner": { username: "owner@example.test", own: false, canClose: false },
+      "s-member": { username: "member@example.test", own: true, canClose: true },
+    });
+    assert.deepEqual(await view(admin), {
+      "s-owner": { username: "owner@example.test", own: false, canClose: true },
+      "s-member": { username: "member@example.test", own: false, canClose: true },
+    }, "owners and admins may close any session in the org");
+    assert.deepEqual(await view(owner), {
+      "s-owner": { username: "owner@example.test", own: true, canClose: true },
+      "s-member": { username: "member@example.test", own: false, canClose: true },
+    });
+    assert.deepEqual(await view(viewer), {
+      "s-owner": { username: "owner@example.test", own: false, canClose: false },
+      "s-member": { username: "member@example.test", own: false, canClose: false },
+    }, "read-only sees who is connected but closes nothing");
+
+    // DELETE does exactly what the list promised.
+    const close = async (user, id) => (await request(port, { method: "DELETE", path: `/api/me/sessions/${id}`, headers: auth(await tokenFor(user)) })).status;
+    assert.equal(await close(member, "s-owner"), 403, "canClose false");
+    assert.equal(await close(viewer, "s-member"), 403, "canClose false");
+    assert.equal(await close(member, "s-member"), 204, "canClose true (own)");
+    open();
+    assert.equal(await close(admin, "s-member"), 204, "canClose true (admin, someone else's)");
+    assert.equal(await close(admin, "s-owner"), 204, "canClose true (admin, an owner's)");
   } finally {
     await server.close();
   }

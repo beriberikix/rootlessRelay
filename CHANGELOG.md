@@ -69,6 +69,11 @@
   `POST /api/orgs/:id/{tier,suspend,unsuspend}`, and members under
   `/api/orgs/:id/members`.
 
+- Session list entries say whose they are and what the caller may do:
+  `username`, `own` and `canClose`. `canClose` and the DELETE route share one
+  check, so the list never offers a close the route would refuse. Usernames go
+  only to roles that can already list the org's members.
+
 ### Changed
 
 - The panel's user delete reports failures (it used to show success on a 409
