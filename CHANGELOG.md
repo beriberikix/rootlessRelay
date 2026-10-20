@@ -28,6 +28,20 @@
 - Audit rows are keyed by org. A lookup by `org:<id>` also returns a personal
   org's earlier `user:<id>` rows. The operator panel maps both forms.
 
+- Org selection: `X-Relay-Org: <id>` (HTTP) or a `relay.org.<id>` subprotocol
+  entry (WebSocket) names the org a signed-in user acts in; it must be one they
+  belong to (`403 not-a-member`, the same answer for a missing org). An API
+  token is bound to its org (`403 token-org-mismatch`). CORS allows `PATCH` and
+  `X-Relay-Org`.
+- Org routes: `GET /api/me/orgs`; `POST/GET/PATCH/DELETE /api/orgs[/:id]`
+  (creation is operator-only during the beta); list, re-role and remove
+  members at `/api/orgs/:id/members[/:userId]`. Removing a member or moving
+  them to a role that cannot open sessions ends their live sessions
+  (`killMember`).
+- JWT identities carry `email` (lower-cased) and `emailVerified`, true only when
+  `JWT_VERIFIED_CLAIM` is set and the IdP vouches for the address; org
+  invitations will match on it.
+
 ### Changed
 
 - Tier is read from the org; setting a user's tier sets it on their personal

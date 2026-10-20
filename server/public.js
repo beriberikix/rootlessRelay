@@ -24,6 +24,8 @@ const STATUS_TEXT = {
 };
 
 const TOKEN_PROTOCOL_PREFIX = "relay.token.";
+const ORG_PROTOCOL_PREFIX = "relay.org.";
+const ORG_HEADER = "x-relay-org";
 const RELAY_PROTOCOL = "relay.v1";
 
 class AuthError extends Error {
@@ -63,10 +65,24 @@ function extractCredential(req, { allowQueryToken = false } = {}) {
   return null;
 }
 
+// The org a request acts in, when the client names one: a `relay.org.<id>`
+// subprotocol entry on a WebSocket (browsers cannot set headers there) or an
+// `X-Relay-Org` header. Null means "the account's default org".
+function extractOrg(req) {
+  let raw = null;
+  for (const protocol of parseProtocols(req.headers["sec-websocket-protocol"])) {
+    if (protocol.startsWith(ORG_PROTOCOL_PREFIX)) raw = protocol.slice(ORG_PROTOCOL_PREFIX.length);
+  }
+  if (raw === null && typeof req.headers[ORG_HEADER] === "string") raw = req.headers[ORG_HEADER].trim();
+  if (raw === null || raw === "") return null;
+  if (!/^[1-9][0-9]{0,9}$/.test(raw)) throw new AuthError(400, "invalid-org");
+  return Number(raw);
+}
+
 function selectProtocol(protocols) {
   if (protocols.has(RELAY_PROTOCOL)) return RELAY_PROTOCOL;
   for (const protocol of protocols) {
-    if (!protocol.startsWith(TOKEN_PROTOCOL_PREFIX)) return protocol;
+    if (!protocol.startsWith(TOKEN_PROTOCOL_PREFIX) && !protocol.startsWith(ORG_PROTOCOL_PREFIX)) return protocol;
   }
   return false;
 }
@@ -153,8 +169,8 @@ function createPublicServer({
     if (!origin || !originAllowed(origin)) return {};
     return {
       "Access-Control-Allow-Origin": origin,
-      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Relay-Org",
       "Access-Control-Max-Age": "600",
       Vary: "Origin",
     };
@@ -265,7 +281,7 @@ function createPublicServer({
         return;
       }
       if (authenticate && (config.authRequired || credential)) {
-        identity = await authenticate(credential ? credential.token : null, { clientIP, req });
+        identity = await authenticate(credential ? credential.token : null, { clientIP, req, orgId: extractOrg(req) });
       }
 
       let admitted = null;
@@ -325,9 +341,11 @@ module.exports = {
   AuthError,
   LOCAL_IDENTITY,
   RELAY_PROTOCOL,
+  ORG_PROTOCOL_PREFIX,
   TOKEN_PROTOCOL_PREFIX,
   createPublicServer,
   extractCredential,
+  extractOrg,
   readJsonBody,
   rejectUpgrade,
   selectProtocol,

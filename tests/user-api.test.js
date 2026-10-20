@@ -95,6 +95,16 @@ async function startServer({ env = {}, usage = null, wrapAuthenticate = signedIn
       });
       return killed;
     },
+    killMember(owner, userId, code, reason) {
+      let killed = 0;
+      activeSessions.forEach((session) => {
+        if (session.identity.owner === owner && session.identity.userId === userId) {
+          session.ws.close(code, reason);
+          killed += 1;
+        }
+      });
+      return killed;
+    },
     killUser(userId, code, reason) {
       let killed = 0;
       activeSessions.forEach((session) => {
@@ -121,6 +131,7 @@ async function startServer({ env = {}, usage = null, wrapAuthenticate = signedIn
     authenticate,
     users: () => users,
     apiTokens,
+    orgs,
     invites,
     usage,
     registry,
@@ -458,6 +469,112 @@ test("deleting an account that solely owns a shared org is refused", async () =>
     assert.equal(refused.json().error, "sole-owner");
     assert.equal(session.closed.length, 0, "nothing is closed when the delete is refused");
     assert.ok(await users.findById(owner.id));
+  } finally {
+    await server.close();
+  }
+});
+
+test("org routes: creation is for operators; reads need membership; managers change members", async () => {
+  const { server, port, users, orgs, apiTokens, activeSessions } = await startServer();
+  try {
+    const ops = await users.create({ username: "ops", role: "operator" });
+    const owner = await users.create({ username: "owner" });
+    const admin = await users.create({ username: "admin" });
+    const member = await users.create({ username: "member" });
+    const stranger = await users.create({ username: "stranger" });
+    const tok = async (user, orgId) => (await apiTokens.create({ userId: user.id, orgId })).token;
+    const call = async (user, method, path, body, { signedIn = true, orgId = undefined } = {}) => {
+      const t = await tok(user, orgId);
+      return request(port, {
+        method, path,
+        headers: { Authorization: `Bearer ${signedIn ? "jwt:" : ""}${t}`, "Content-Type": "application/json" },
+        body: body === undefined ? null : JSON.stringify(body),
+      });
+    };
+
+    // Only operators create orgs, and not with a bare API token.
+    assert.equal((await call(owner, "POST", "/api/orgs", { name: "team" })).status, 403);
+    assert.equal((await call(ops, "POST", "/api/orgs", { name: "team" }, { signedIn: false })).status, 403);
+    assert.equal((await call(ops, "POST", "/api/orgs", {})).status, 400);
+    assert.equal((await call(ops, "POST", "/api/orgs", { name: "team", ownerUserId: 9999 })).status, 400);
+    const created = await call(ops, "POST", "/api/orgs", { name: "team", ownerUserId: owner.id });
+    assert.equal(created.status, 201);
+    const orgId = created.json().id;
+    assert.equal(created.json().personal, false);
+    await orgs.addMember({ orgId, userId: admin.id, role: "admin" });
+    await orgs.addMember({ orgId, userId: member.id, role: "member" });
+    const base = `/api/orgs/${orgId}`;
+
+    // The list shows personal and shared orgs with the caller's role.
+    const mine = (await call(member, "GET", "/api/me/orgs")).json();
+    assert.deepEqual(mine.map((o) => [o.personal, o.role]), [[true, "owner"], [false, "member"]]);
+
+    // Outsiders cannot tell the org exists.
+    for (const [method, path] of [["GET", base], ["GET", `${base}/members`], ["PATCH", base], ["DELETE", base], ["DELETE", `${base}/members/${member.id}`]]) {
+      assert.equal((await call(stranger, method, path, method === "PATCH" ? { name: "x" } : undefined)).status, 404, `${method} ${path}`);
+    }
+    assert.equal((await call(stranger, "GET", "/api/orgs/9999")).status, 404, "unknown org answers the same");
+
+    // Members read; managers rename; only owners delete.
+    assert.deepEqual((await call(member, "GET", base)).json().role, "member");
+    assert.deepEqual((await call(member, "GET", `${base}/members`)).json().map((m) => m.username).sort(), ["admin", "member", "owner"]);
+    assert.equal((await call(member, "PATCH", base, { name: "renamed" })).status, 403);
+    assert.equal((await call(admin, "PATCH", base, { name: "renamed" })).json().name, "renamed");
+    assert.equal((await call(admin, "PATCH", base, { name: "  " })).status, 400);
+    assert.equal((await call(admin, "DELETE", base)).status, 403);
+
+    // Role changes: admins cannot make owners; an unknown role is a 400; demotion ends sessions.
+    const memberSession = fakeSession({ owner: `org:${orgId}`, userId: member.id });
+    const ownerSession = fakeSession({ owner: `org:${orgId}`, userId: owner.id });
+    activeSessions.set("s-member", memberSession);
+    activeSessions.set("s-owner", ownerSession);
+    const roleOf = (user) => `${base}/members/${user.id}`;
+    assert.equal((await call(admin, "PATCH", roleOf(member), { role: "owner" })).status, 403);
+    assert.equal((await call(admin, "PATCH", roleOf(member), { role: "wizard" })).status, 400);
+    assert.equal((await call(member, "PATCH", roleOf(admin), { role: "member" })).status, 403);
+    assert.equal((await call(admin, "PATCH", roleOf(member), { role: "read_only" })).json().role, "read_only");
+    assert.deepEqual(memberSession.closed, [{ code: 1008, reason: "role changed" }]);
+    assert.equal(ownerSession.closed.length, 0);
+    assert.equal((await call(admin, "PATCH", roleOf(owner), { role: "member" })).status, 403);
+    assert.equal((await call(owner, "PATCH", roleOf(owner), { role: "admin" })).status, 403, "nobody edits their own role");
+
+    // Removing a member ends their sessions; the last owner cannot leave.
+    memberSession.closed.length = 0;
+    assert.equal((await call(admin, "DELETE", roleOf(member))).status, 204);
+    assert.deepEqual(memberSession.closed, [{ code: 1008, reason: "removed from organization" }]);
+    assert.equal((await call(admin, "DELETE", roleOf(member))).status, 404);
+    const leave = await call(owner, "DELETE", roleOf(owner));
+    assert.equal(leave.status, 409);
+    assert.equal(leave.json().error, "last-owner");
+
+    // Deleting the org closes its sessions; personal orgs cannot be deleted this way.
+    assert.equal((await call(owner, "DELETE", base)).status, 204);
+    assert.deepEqual(ownerSession.closed, [{ code: 1008, reason: "organization deleted" }]);
+    assert.equal((await call(owner, "GET", base)).status, 404);
+    const personal = await call(owner, "DELETE", `/api/orgs/${owner.default_org_id}`);
+    assert.equal(personal.status, 409);
+    assert.equal(personal.json().error, "personal-org");
+  } finally {
+    await server.close();
+  }
+});
+
+test("a token stays in its org; naming another is refused; a bad org id is a 400", async () => {
+  const { server, port, users, orgs, apiTokens } = await startServer();
+  try {
+    const alice = await users.create({ username: "alice" });
+    const team = await orgs.create({ name: "team", ownerUserId: alice.id });
+    const personal = (await apiTokens.create({ userId: alice.id })).token;
+    const get = (headers) => request(port, { path: "/api/me", headers: { Authorization: `Bearer ${personal}`, ...headers } });
+
+    assert.equal((await get({})).json().org.id, alice.default_org_id);
+    assert.equal((await get({ "X-Relay-Org": String(alice.default_org_id) })).status, 200);
+    const mismatch = await get({ "X-Relay-Org": String(team.id) });
+    assert.equal(mismatch.status, 403);
+    assert.equal(mismatch.json().error, "token-org-mismatch");
+    assert.equal((await get({ "X-Relay-Org": "abc" })).status, 400);
+    assert.equal((await get({ "X-Relay-Org": "0" })).status, 400);
+    assert.equal((await get({ "X-Relay-Org": "1; drop" })).status, 400);
   } finally {
     await server.close();
   }

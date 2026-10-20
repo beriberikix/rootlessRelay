@@ -10,10 +10,11 @@
 // their account, redeem an invite and delete themselves; everything that
 // leads to relay access is refused with 403 account-pending.
 
-const { AuthError, extractCredential, readJsonBody, writeJson } = require("./public");
-const { roleAllows } = require("../auth/orgs");
+const { AuthError, extractCredential, extractOrg, readJsonBody, writeJson } = require("./public");
+const { ROLES, publicOrg, roleAllows } = require("../auth/orgs");
 
 const PREFIX = "/api/me";
+const ORGS_PREFIX = "/api/orgs";
 const MAX_ACTIVE_TOKENS = 20;
 const MAX_TOKEN_DAYS = 365;
 const REDEEM_FAILURES_PER_HOUR = 10;
@@ -65,6 +66,7 @@ function createUserApi({
   authenticate,
   users,
   apiTokens,
+  orgs = null,
   invites = null,
   usage,
   registry,
@@ -82,7 +84,7 @@ function createUserApi({
     if (!credential || credential.source !== "header") {
       throw new AuthError(401, "authentication-required");
     }
-    const identity = await authenticate(credential.token, { clientIP, req, allowPending: true });
+    const identity = await authenticate(credential.token, { clientIP, req, allowPending: true, orgId: extractOrg(req) });
     if (!identity || !identity.userId) throw new AuthError(403, "account-required");
     return identity;
   }
@@ -126,6 +128,33 @@ function createUserApi({
       bytes,
       quotaBytes: tier && tier.quotaBytes !== undefined ? tier.quotaBytes : null,
     };
+  }
+
+  const ORG_PATH = /^\/api\/orgs\/([0-9]+)$/;
+  const MEMBERS_PATH = /^\/api\/orgs\/([0-9]+)\/members$/;
+  const MEMBER_PATH = /^\/api\/orgs\/([0-9]+)\/members\/([0-9]+)$/;
+
+  // Who is acting, as the org store wants it. Operators pass every check.
+  function principal(identity) {
+    return { userId: identity.userId, operator: identity.kind === "operator" };
+  }
+
+  // 404 for an org the caller has no role in, so ids cannot be probed.
+  async function requireMember(identity, orgId) {
+    if (!orgId) throw new AuthError(404, "not-found");
+    const known = principal(identity).operator
+      ? await store(orgs).findById(orgId)
+      : await store(orgs).getMembership(orgId, identity.userId);
+    if (!known) throw new AuthError(404, "not-found");
+  }
+
+  // Checks `action` on the org named in the path and returns its id: 404 when
+  // the caller is not a member, 403 when their role does not allow it.
+  async function authorizeOrg(identity, action, path) {
+    const orgId = parseId(/\/api\/orgs\/([0-9]+)/.exec(path)[1]);
+    await requireMember(identity, orgId);
+    if (!(await store(orgs).authorize(principal(identity), action, orgId))) throw new AuthError(403, "forbidden");
+    return orgId;
   }
 
   const routes = [
@@ -283,10 +312,114 @@ function createUserApi({
         return [204, null];
       },
     },
+
+    // ---- organizations ----
+    {
+      method: "GET",
+      match: (path) => path === `${PREFIX}/orgs`,
+      async handle({ identity }) {
+        return [200, await store(orgs).listForUser(identity.userId)];
+      },
+    },
+    {
+      method: "POST",
+      match: (path) => path === ORGS_PREFIX,
+      async handle({ identity, req }) {
+        requireSignIn(identity);
+        // Beta: only operators create shared orgs.
+        if (identity.kind !== "operator") return [403, { error: "forbidden" }];
+        const body = await readJsonBody(req);
+        const name = typeof body.name === "string" ? body.name.trim() : "";
+        if (!name) return [400, { error: "name is required" }];
+        const ownerUserId = body.ownerUserId === undefined ? identity.userId : parseId(body.ownerUserId);
+        const owner = ownerUserId ? await store(users).findById(ownerUserId) : null;
+        if (!owner) return [400, { error: "ownerUserId must be an existing user" }];
+        const org = await store(orgs).create({ name, ownerUserId: owner.id, tier: typeof body.tier === "string" ? body.tier : "user" });
+        log?.info("org created", { orgId: org.id, ownerUserId: owner.id, by: identity.userId });
+        return [201, publicOrg(org)];
+      },
+    },
+    {
+      method: "GET",
+      match: (path) => ORG_PATH.test(path),
+      async handle({ identity, path }) {
+        const orgId = await authorizeOrg(identity, "org.view", path);
+        const org = await store(orgs).findById(orgId);
+        const membership = await store(orgs).getMembership(orgId, identity.userId);
+        return [200, { ...publicOrg(org), role: membership ? membership.role : null }];
+      },
+    },
+    {
+      method: "PATCH",
+      match: (path) => ORG_PATH.test(path),
+      async handle({ identity, req, path }) {
+        requireSignIn(identity);
+        const orgId = await authorizeOrg(identity, "org.rename", path);
+        const body = await readJsonBody(req);
+        if (typeof body.name !== "string" || !body.name.trim()) return [400, { error: "name is required" }];
+        await store(orgs).rename(orgId, body.name);
+        return [200, publicOrg(await store(orgs).findById(orgId))];
+      },
+    },
+    {
+      method: "DELETE",
+      match: (path) => ORG_PATH.test(path),
+      async handle({ identity, path }) {
+        requireSignIn(identity);
+        const orgId = await authorizeOrg(identity, "org.delete", path);
+        await store(orgs).remove(orgId);
+        const killed = registry ? registry.killOwner(`org:${orgId}`, 1008, "organization deleted") : 0;
+        log?.info("org deleted", { orgId, killedSessions: killed, by: identity.userId });
+        return [204, null];
+      },
+    },
+    {
+      method: "GET",
+      match: (path) => MEMBERS_PATH.test(path),
+      async handle({ identity, path }) {
+        const orgId = await authorizeOrg(identity, "member.list", path);
+        return [200, await store(orgs).listMembers(orgId)];
+      },
+    },
+    {
+      method: "PATCH",
+      match: (path) => MEMBER_PATH.test(path),
+      async handle({ identity, req, path }) {
+        requireSignIn(identity);
+        const [, orgPart, userPart] = MEMBER_PATH.exec(path);
+        const orgId = parseId(orgPart);
+        const userId = parseId(userPart);
+        const body = await readJsonBody(req);
+        if (!ROLES.includes(body.role)) return [400, { error: `role must be one of ${ROLES.join(", ")}` }];
+        await requireMember(identity, orgId);
+        const result = await store(orgs).setMemberRole({ orgId, actor: principal(identity), userId, role: body.role });
+        // A role that cannot open sessions ends the member's live ones.
+        if (!roleAllows(result.role, "session.open") && registry && registry.killMember) {
+          registry.killMember(`org:${orgId}`, userId, 1008, "role changed");
+        }
+        log?.info("org role changed", { orgId, userId, role: result.role, by: identity.userId });
+        return [200, result];
+      },
+    },
+    {
+      method: "DELETE",
+      match: (path) => MEMBER_PATH.test(path),
+      async handle({ identity, path }) {
+        requireSignIn(identity);
+        const [, orgPart, userPart] = MEMBER_PATH.exec(path);
+        const orgId = parseId(orgPart);
+        const userId = parseId(userPart);
+        await requireMember(identity, orgId);
+        await store(orgs).removeMember({ orgId, actor: principal(identity), userId });
+        const killed = registry && registry.killMember ? registry.killMember(`org:${orgId}`, userId, 1008, "removed from organization") : 0;
+        log?.info("org member removed", { orgId, userId, killedSessions: killed, by: identity.userId });
+        return [204, null];
+      },
+    },
   ];
 
   function matches(path) {
-    return path === PREFIX || path.startsWith(`${PREFIX}/`);
+    return path === PREFIX || path.startsWith(`${PREFIX}/`) || path === ORGS_PREFIX || path.startsWith(`${ORGS_PREFIX}/`);
   }
 
   // Returns true when the request was handled (always, for matching paths).

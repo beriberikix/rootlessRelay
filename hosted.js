@@ -163,6 +163,7 @@ function init(ctx) {
         authenticate,
         users: () => state.users,
         apiTokens: () => state.apiTokens,
+        orgs: () => state.orgs,
         invites: () => state.invites,
         usage,
         registry,
