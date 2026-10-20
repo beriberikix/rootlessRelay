@@ -208,6 +208,27 @@ const MIGRATIONS = [
       );
     },
   },
+  {
+    // The audit is keyed by owner, which is an org for accounts, so a row no
+    // longer says which member made the connection. user_id records that. It is
+    // not a foreign key: rows outlive the account for the retention window.
+    // Earlier rows are attributed where that is unambiguous: "user:<id>" rows
+    // name the user, and "org:<id>" rows of a personal org (the only kind that
+    // existed before this migration) name its owner.
+    version: 5,
+    async up(db) {
+      await db.exec(`
+        ALTER TABLE connections_audit ADD COLUMN user_id INTEGER;
+        CREATE INDEX connections_audit_user_started ON connections_audit(user_id, started_at);
+        UPDATE connections_audit SET user_id = CAST(substr(owner, 6) AS INTEGER)
+          WHERE owner GLOB 'user:[0-9]*' AND substr(owner, 6) NOT GLOB '*[^0-9]*';
+        UPDATE connections_audit SET user_id = (
+            SELECT m.user_id FROM memberships m JOIN orgs o ON o.id = m.org_id
+            WHERE o.personal = 1 AND m.role = 'owner' AND 'org:' || o.id = connections_audit.owner)
+          WHERE owner GLOB 'org:[0-9]*' AND user_id IS NULL;
+      `);
+    },
+  },
 ];
 
 // All access shares one sqlite3 connection, where a transaction is

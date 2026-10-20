@@ -383,6 +383,10 @@
           <input id="audit-owner" class="catppuccin-input" type="text" placeholder="org:7 or anon:…">
         </div>
         <div class="form-group">
+          <label for="audit-user">User id</label>
+          <input id="audit-user" class="catppuccin-input" type="number" min="1" style="width: 7em;">
+        </div>
+        <div class="form-group">
           <label for="audit-verdict">Verdict</label>
           <select id="audit-verdict" class="catppuccin-input">
             <option value="">any</option>
@@ -1086,6 +1090,8 @@
       const params = new URLSearchParams();
       const owner = $('#audit-owner').value.trim();
       if (owner) params.set('owner', owner);
+      const auditUser = $('#audit-user').value.trim();
+      if (auditUser) params.set('userId', auditUser);
       const verdict = $('#audit-verdict').value;
       if (verdict) params.set('verdict', verdict);
       const dst = $('#audit-dst').value.trim();
@@ -1107,6 +1113,9 @@
       ]);
       // Rows are keyed by org now, and by user for connections before orgs existed.
       const byOwner = new Map(users.flatMap((u) => [[`user:${u.id}`, u], [`org:${u.defaultOrgId}`, u]]));
+      const byId = new Map(users.map((u) => [u.id, u]));
+      // The member who connected, when the row records one; else the owner's account.
+      const who = (row) => byId.get(row.userId) || byOwner.get(row.owner);
       $('#audit-disabled').classList.toggle('hidden', result.enabled);
       const tbody = $('#audit tbody');
       tbody.innerHTML = '';
@@ -1114,7 +1123,7 @@
         const verdictKind = row.verdict.startsWith('deny') ? 'deny' : 'allow';
         tbody.appendChild(el('tr', {}, [
           el('td', { text: formatTime(row.startedAt) }),
-          el('td', { class: 'mono', title: row.owner, text: byOwner.has(row.owner) ? byOwner.get(row.owner).username : row.owner }),
+          el('td', { class: 'mono', title: row.owner, text: who(row) ? who(row).username : row.owner }),
           el('td', { class: 'mono', title: row.sessionId, text: row.sessionId.slice(0, 8) }),
           el('td', { text: row.proto }),
           el('td', { class: 'mono', text: `${row.dstIP}:${row.dstPort}` }),
@@ -1122,8 +1131,8 @@
           el('td', { class: 'num', text: row.bytesIn === null ? '' : formatBytes(row.bytesIn) }),
           el('td', { class: 'num', text: row.bytesOut === null ? '' : formatBytes(row.bytesOut) }),
           el('td', { text: formatDuration(row.startedAt, row.endedAt) }),
-          el('td', {}, byOwner.has(row.owner) && byOwner.get(row.owner).status !== 'banned'
-            ? [el('button', { type: 'button', class: 'small danger', text: 'Ban owner', 'data-action': 'ban-owner', 'data-user': byOwner.get(row.owner).id, 'data-username': byOwner.get(row.owner).username })]
+          el('td', {}, who(row) && who(row).status !== 'banned'
+            ? [el('button', { type: 'button', class: 'small danger', text: 'Ban user', 'data-action': 'ban-owner', 'data-user': who(row).id, 'data-username': who(row).username })]
             : []),
         ]));
       }

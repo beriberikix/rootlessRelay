@@ -236,10 +236,9 @@ test("a removed member falls back to their personal org as default", async () =>
 
 test("migration 4 gives every existing user a personal org and carries tokens, tier and usage", async () => {
   const db = openDatabase(":memory:");
-  const last = MIGRATIONS[MIGRATIONS.length - 1];
-  assert.equal(last.version, 4);
+  assert.deepEqual(MIGRATIONS.slice(-2).map((m) => m.version), [4, 5]);
+  const later = MIGRATIONS.splice(3);
   const generated = generateApiToken();
-  MIGRATIONS.pop();
   try {
     await db.migrate();
     const at = "2026-01-01T00:00:00.000Z";
@@ -259,11 +258,11 @@ test("migration 4 gives every existing user a personal org and carries tokens, t
       [generated.prefix, generated.hash, at],
     );
   } finally {
-    MIGRATIONS.push(last);
+    MIGRATIONS.push(...later);
   }
 
-  assert.equal(await db.migrate(), 4);
-  assert.equal(await db.migrate(), 4, "running again is a no-op");
+  assert.equal(await db.migrate(), 5);
+  assert.equal(await db.migrate(), 5, "running again is a no-op");
 
   const users = createUserStore(db, { bcryptRounds: 4 });
   const orgs = createOrgStore(db);
@@ -293,7 +292,9 @@ test("migration 4 gives every existing user a personal org and carries tokens, t
     { org_id: bob.default_org_id, month: "2026-10", bytes_in: 5, bytes_out: 5, sessions: 1 },
   ]);
   assert.equal((await db.get("SELECT COUNT(*) AS n FROM usage_monthly")).n, 3, "the old table is left in place for a rollback");
-  assert.equal((await db.get("SELECT owner FROM connections_audit")).owner, "user:2", "audit rows are not rewritten");
+  const auditRow = await db.get("SELECT owner, user_id FROM connections_audit");
+  assert.equal(auditRow.owner, "user:2", "audit rows keep their owner string");
+  assert.equal(auditRow.user_id, 2, "and are attributed to the user they name");
   assert.equal((await db.all("PRAGMA foreign_key_check")).length, 0);
   await db.close();
 });
@@ -337,5 +338,61 @@ test("audit lookups by org also find the personal org's rows from before orgs ex
   assert.deepEqual(await owners(`org:${bob.default_org_id}`), ["bobs"], "another user's rows are not pulled in");
   assert.deepEqual(await owners(`org:${team.id}`), ["team"], "a shared org has no legacy rows");
   assert.deepEqual(await owners(`user:${alice.id}`), ["old"], "exact owner strings still match exactly");
+  audit.close();
+});
+
+test("migration 5 attributes earlier audit rows only where the user is unambiguous", async () => {
+  const db = openDatabase(":memory:");
+  const later = MIGRATIONS.splice(4);
+  assert.equal(later[0].version, 5);
+  let alice;
+  let team;
+  try {
+    await db.migrate();
+    const users = createUserStore(db, { bcryptRounds: 4 });
+    const orgs = createOrgStore(db);
+    alice = await users.create({ username: "alice" });
+    const bob = await users.create({ username: "bob" });
+    team = await orgs.create({ name: "team", ownerUserId: bob.id });
+    const insert = (owner, id) => db.run(
+      "INSERT INTO connections_audit (owner, session_id, proto, dst_ip, dst_port, verdict, started_at) VALUES (?, ?, 'tcp', '1.1.1.1', 443, 'allow', 1)",
+      [owner, id],
+    );
+    await insert(`user:${alice.id}`, "legacy");
+    await insert(`org:${alice.default_org_id}`, "personal");
+    await insert(`org:${team.id}`, "shared");
+    await insert("anon:x", "anon");
+    await insert("user:12x", "malformed");
+  } finally {
+    MIGRATIONS.push(...later);
+  }
+  assert.equal(await db.migrate(), 5);
+  const byId = Object.fromEntries((await db.all("SELECT session_id, user_id FROM connections_audit")).map((r) => [r.session_id, r.user_id]));
+  assert.deepEqual(byId, { legacy: alice.id, personal: alice.id, shared: null, anon: null, malformed: null });
+  await db.close();
+});
+
+test("audit rows record the acting member and can be filtered by user", async () => {
+  const { db, users, orgs } = await setup();
+  const { createAuditLog } = require("../metering/audit");
+  const alice = await users.create({ username: "alice" });
+  const bob = await users.create({ username: "bob" });
+  const team = await orgs.create({ name: "team", ownerUserId: alice.id });
+  await orgs.addMember({ orgId: team.id, userId: bob.id, role: "member" });
+  const quiet = { debug() {}, info() {}, warn() {}, error() {} };
+  const audit = createAuditLog({ db, retentionDays: 30, log: quiet, batchMs: 1e9, pruneIntervalMs: 1e9 });
+  const row = (key, userId) => audit.record({ key, owner: `org:${team.id}`, userId, sessionId: key, proto: "tcp", dstIP: "9.9.9.9", dstPort: 443, verdict: "allow", startedAt: Date.now() });
+  row("a1", alice.id);
+  row("b1", bob.id);
+  row("b2", bob.id);
+  audit.record({ key: "n", owner: "anon:x", sessionId: "n", proto: "tcp", dstIP: "9.9.9.9", dstPort: 443, verdict: "allow", startedAt: Date.now() });
+  await audit.flush();
+
+  const ids = async (query) => (await audit.query(query)).map((r) => r.sessionId).sort();
+  assert.deepEqual(await ids({ owner: `org:${team.id}` }), ["a1", "b1", "b2"], "the org sees every member");
+  assert.deepEqual(await ids({ userId: bob.id }), ["b1", "b2"]);
+  assert.deepEqual(await ids({ owner: `org:${team.id}`, userId: alice.id }), ["a1"]);
+  assert.deepEqual((await audit.query({ userId: bob.id })).map((r) => r.userId), [bob.id, bob.id]);
+  assert.equal((await audit.query({ owner: "anon:x" }))[0].userId, null);
   audit.close();
 });

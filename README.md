@@ -375,7 +375,7 @@ the default level.
   below it and keep `min-instances=1`.
 - Egress bandwidth is the dominant cost. Tier quotas and `RATE_LIMIT_KBPS`
   are the knobs.
-- The audit log (owner, destination, bytes, times) is what lets you answer an
+- The audit log (owner, the member who connected, destination, bytes, times) is what lets you answer an
   abuse report; keep `AUDIT_RETENTION_DAYS` at least as long as your provider's
   complaint window.
 - Upload limiting drops VM data segments over budget, so it polices rather

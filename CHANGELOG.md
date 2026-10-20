@@ -42,6 +42,12 @@
   `JWT_VERIFIED_CLAIM` is set and the IdP vouches for the address; org
   invitations will match on it.
 
+- Connection audit rows record the acting user (`user_id`, migration 5), so a
+  connection in a shared org traces to one member. Earlier rows are filled in
+  where unambiguous (`user:<id>` rows, and `org:<id>` rows of a personal org).
+  `GET /api/audit` on the admin port takes `userId`; rows carry `userId`; the
+  panel shows the member and bans that user.
+
 ### Changed
 
 - Tier is read from the org; setting a user's tier sets it on their personal

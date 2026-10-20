@@ -50,6 +50,7 @@ function fakeSession(id = "s1") {
 function makePolicy({
   tier = "local",
   owner = "local",
+  userId = undefined,
   egressMode = "open",
   ctx = makeCtx(),
   now = () => 1000,
@@ -61,7 +62,7 @@ function makePolicy({
 } = {}) {
   const policy = new SessionPolicy({
     tier: tiers[tier],
-    identity: { kind: tier, owner, tier },
+    identity: { kind: tier, owner, userId, tier },
     egress: createEgressPolicy({ mode: egressMode, localAddresses: () => new Set(), denyPorts: [25] }),
     ctx,
     antiSpoof,
@@ -321,11 +322,13 @@ test("audit receives allow rows with bytes on close and rate-limited deny rows",
   const finished = [];
   const audit = { record: (row) => rows.push(row), finish: (key, data) => finished.push({ key, ...data }) };
   let clock = 0;
-  const policy = makePolicy({ tier: "user", owner: "user:1", egressMode: "hosted", audit, now: () => clock });
+  const policy = makePolicy({ tier: "user", owner: "org:9", userId: 4, egressMode: "hosted", audit, now: () => clock });
   const session = attach(policy, fakeSession("sess"));
   policy.allowTcpConnect(session, { srcIP: "10.0.2.15", srcPort: 1, dstIP: "1.1.1.1", dstPort: 443, seqNum: 1 });
   policy.onTcpClose(session, "1:1.1.1.1:443", { socket: { bytesRead: 10, bytesWritten: 20 } });
   assert.equal(rows[0].verdict, "allow");
+  assert.equal(rows[0].owner, "org:9");
+  assert.equal(rows[0].userId, 4, "the member who connected is recorded with the org");
   assert.deepEqual(finished[0], { key: "sess:1:1.1.1.1:443", endedAt: 0, bytesIn: 10, bytesOut: 20, error: null });
   policy.allowTcpConnect(session, { srcIP: "10.0.2.15", srcPort: 2, dstIP: "127.0.0.1", dstPort: 8001, seqNum: 1 });
   policy.allowTcpConnect(session, { srcIP: "10.0.2.15", srcPort: 3, dstIP: "127.0.0.1", dstPort: 8001, seqNum: 1 });
@@ -333,6 +336,7 @@ test("audit receives allow rows with bytes on close and rate-limited deny rows",
   clock = 20000;
   policy.allowTcpConnect(session, { srcIP: "10.0.2.15", srcPort: 4, dstIP: "127.0.0.1", dstPort: 8001, seqNum: 1 });
   assert.equal(rows.filter((row) => row.verdict.startsWith("deny")).length, 2);
+  assert.ok(rows.filter((row) => row.verdict.startsWith("deny")).every((row) => row.userId === 4), "denials name the member too");
 });
 
 test("createPolicyFactory picks the identity tier and falls back to user", () => {
