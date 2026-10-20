@@ -48,6 +48,12 @@
   `GET /api/audit` on the admin port takes `userId`; rows carry `userId`; the
   panel shows the member and bans that user.
 
+- `scripts/check-migration.js <db>` rehearses the schema migrations on a copy
+  of a database (a restored backup) and checks what must survive: users,
+  tokens and usage totals, one personal org per user with matching tier,
+  token and audit attribution, integrity and foreign keys, and that a second
+  run changes nothing. It prints counts only and exits 1 on any failure.
+
 ### Changed
 
 - Tier is read from the org; setting a user's tier sets it on their personal
