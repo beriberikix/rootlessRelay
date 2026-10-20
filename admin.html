@@ -380,7 +380,7 @@
         </div>
         <div class="form-group">
           <label for="audit-owner">Owner</label>
-          <input id="audit-owner" class="catppuccin-input" type="text" placeholder="user:7 or anon:…">
+          <input id="audit-owner" class="catppuccin-input" type="text" placeholder="org:7 or anon:…">
         </div>
         <div class="form-group">
           <label for="audit-verdict">Verdict</label>
@@ -1105,7 +1105,8 @@
         apiJson(`/api/audit?${params.toString()}`),
         apiJson('/api/users').catch(() => []),
       ]);
-      const byOwner = new Map(users.map((u) => [`user:${u.id}`, u]));
+      // Rows are keyed by org now, and by user for connections before orgs existed.
+      const byOwner = new Map(users.flatMap((u) => [[`user:${u.id}`, u], [`org:${u.defaultOrgId}`, u]]));
       $('#audit-disabled').classList.toggle('hidden', result.enabled);
       const tbody = $('#audit tbody');
       tbody.innerHTML = '';

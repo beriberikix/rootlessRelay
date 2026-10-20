@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const jose = require("jose");
 const { openDatabase } = require("../auth/db");
 const { createUserStore } = require("../auth/users");
+const { createOrgStore } = require("../auth/orgs");
 const { AuthError } = require("../server/public");
 const {
   ANON_ISSUER,
@@ -24,7 +25,8 @@ async function setup() {
   const users = createUserStore(db, { bcryptRounds: 4 });
   const clock = { now: 1_700_000_000_000 };
   const apiTokens = createApiTokenStore(db, { now: () => clock.now });
-  return { db, users, apiTokens, clock };
+  const orgs = createOrgStore(db);
+  return { db, users, apiTokens, orgs, clock };
 }
 
 test("API token format, hashing and parsing", () => {
@@ -128,7 +130,7 @@ test("external JWT verification with a local JWKS", async () => {
 });
 
 test("authenticator dispatches API tokens, anon tokens and external JWTs", async () => {
-  const { db, users, apiTokens, clock } = await setup();
+  const { db, users, apiTokens, orgs, clock } = await setup();
   const { privateKey, publicKey } = await jose.generateKeyPair("RS256");
   const jwk = await jose.exportJWK(publicKey);
   const jwt = createJwtVerifier({
@@ -140,7 +142,7 @@ test("authenticator dispatches API tokens, anon tokens and external JWTs", async
   });
   const anon = createAnonIssuer({ secret: "anon", now: () => clock.now });
   const config = { authRequired: true, anonEnabled: true, jwt: { defaultTier: "user" } };
-  const authenticate = createAuthenticator({ config, users, apiTokens, anon, jwt });
+  const authenticate = createAuthenticator({ config, users, apiTokens, orgs, anon, jwt });
 
   await assert.rejects(authenticate(null, {}), (error) => error.status === 401 && error.code === "authentication-required");
   await assert.rejects(authenticate("garbage", {}), /invalid-token/);
@@ -148,7 +150,10 @@ test("authenticator dispatches API tokens, anon tokens and external JWTs", async
   const alice = await users.create({ username: "alice", password: "password-1" });
   const created = await apiTokens.create({ userId: alice.id });
   const viaToken = await authenticate(created.token, { clientIP: "1.1.1.1" });
-  assert.deepEqual(viaToken, { kind: "user", owner: `user:${alice.id}`, userId: alice.id, username: "alice", tier: "user", status: "active", via: "api-token", tokenId: created.id });
+  assert.deepEqual(viaToken, {
+    kind: "user", owner: `org:${alice.default_org_id}`, orgId: alice.default_org_id, orgRole: "owner",
+    userId: alice.id, username: "alice", tier: "user", status: "active", via: "api-token", tokenId: created.id,
+  });
   await users.setStatus(alice.id, "banned");
   await assert.rejects(authenticate(created.token, {}), (error) => error.status === 403);
 
@@ -158,7 +163,7 @@ test("authenticator dispatches API tokens, anon tokens and external JWTs", async
 
   const anonToken = (await anon.issue({ ip: "9.9.9.9" })).token;
   assert.equal((await authenticate(anonToken, { clientIP: "9.9.9.9" })).kind, "anon");
-  const disabled = createAuthenticator({ config: { ...config, anonEnabled: false }, users, apiTokens, anon, jwt });
+  const disabled = createAuthenticator({ config: { ...config, anonEnabled: false }, users, apiTokens, orgs, anon, jwt });
   await assert.rejects(disabled(anonToken, { clientIP: "9.9.9.9" }), /anonymous-access-disabled/);
 
   const external = await new jose.SignJWT({ email: "bob@example.com" })
@@ -185,12 +190,12 @@ test("authenticator dispatches API tokens, anon tokens and external JWTs", async
     .sign(privateKey);
   await assert.rejects(authenticate(foreign, {}), /unknown-issuer/);
 
-  const optional = createAuthenticator({ config: { ...config, authRequired: false }, users, apiTokens, anon, jwt });
+  const optional = createAuthenticator({ config: { ...config, authRequired: false }, users, apiTokens, orgs, anon, jwt });
   assert.equal((await optional(null, {})).kind, "local");
 
   // Invite-only sign-up: a first-time external login creates a pending
   // account that may use the account API but not open sessions.
-  const invite = createAuthenticator({ config: { ...config, signupMode: "invite" }, users, apiTokens, anon, jwt });
+  const invite = createAuthenticator({ config: { ...config, signupMode: "invite" }, users, apiTokens, orgs, anon, jwt });
   const carolJwt = await new jose.SignJWT({ email: "carol@example.com" })
     .setProtectedHeader({ alg: "RS256" })
     .setIssuer("https://idp.example")

@@ -4,7 +4,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { MIGRATIONS, openDatabase } = require("../auth/db");
 const { createUserStore } = require("../auth/users");
-const { createApiTokenStore } = require("../auth/tokens");
+const { createApiTokenStore, generateApiToken } = require("../auth/tokens");
 const { createInviteStore, generateInviteCode, normalizeInviteCode } = require("../auth/invites");
 
 test("invite codes are readable and normalize loosely", () => {
@@ -74,7 +74,13 @@ test("migration 2 rebuilds users without losing tokens", async () => {
   await db.run("INSERT INTO users (username, role, tier, status, created_at) VALUES ('old', 'user', 'user', 'active', '2026-01-01')");
   await assert.rejects(db.run("UPDATE users SET status = 'pending' WHERE id = 1"), /CHECK/);
   const v1Tokens = createApiTokenStore(db);
-  const token = await v1Tokens.create({ userId: 1, name: "keep" });
+  // Written with the version 1 columns: the token store targets the current schema.
+  const generated = generateApiToken();
+  await db.run(
+    "INSERT INTO api_tokens (user_id, name, token_prefix, token_hash, created_at) VALUES (1, 'keep', ?, ?, '2026-01-01')",
+    [generated.prefix, generated.hash],
+  );
+  const token = generated;
 
   assert.equal(await db.migrate(), MIGRATIONS[MIGRATIONS.length - 1].version);
   const users = createUserStore(db, { bcryptRounds: 4 });

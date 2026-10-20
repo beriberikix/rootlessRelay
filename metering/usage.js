@@ -1,7 +1,7 @@
 "use strict";
 
 // Per-owner byte metering and quotas. Account usage is accumulated per
-// calendar month in SQLite (usage_monthly); anonymous usage is kept in memory
+// calendar month in SQLite (org_usage_monthly); anonymous usage is kept in memory
 // per client address per day. Sessions are sampled on a timer and on close,
 // so a crash loses at most one flush interval.
 
@@ -47,7 +47,7 @@ function createUsageMeter({
 
   const tracked = new Map(); // session -> { lastSent, lastReceived }
   const memoryTotals = new Map(); // "day:<key>:<id>" -> bytes (anon / in-memory quotas)
-  const dbTotals = new Map(); // "month:<key>:<userId>" -> bytes (cache of usage_monthly + unflushed)
+  const dbTotals = new Map(); // "month:<key>:<orgId>" -> bytes (cache of org_usage_monthly + unflushed)
   let flushing = null;
 
   function tierFor(session) {
@@ -60,8 +60,8 @@ function createUsageMeter({
   function quotaKey(session, ts = now()) {
     const identity = session.identity || {};
     const tier = tierFor(session);
-    if (identity.userId) {
-      return { store: "db", key: `month:${monthKey(ts)}:${identity.userId}`, userId: identity.userId, month: monthKey(ts) };
+    if (identity.orgId) {
+      return { store: "db", key: `month:${monthKey(ts)}:${identity.orgId}`, orgId: identity.orgId, month: monthKey(ts) };
     }
     const period = tier.quotaPeriod === "day" ? dayKey(ts) : monthKey(ts);
     return { store: "memory", key: `${tier.quotaPeriod}:${period}:${session.clientIP}` };
@@ -69,13 +69,13 @@ function createUsageMeter({
 
   const loading = new Map(); // key -> in-flight load, so deltas applied meanwhile are kept
 
-  async function loadDbTotal(userId, month) {
-    const key = `month:${month}:${userId}`;
+  async function loadDbTotal(orgId, month) {
+    const key = `month:${month}:${orgId}`;
     if (loading.has(key)) return loading.get(key);
     if (dbTotals.has(key)) return dbTotals.get(key);
     const pending = (async () => {
       const row = db
-        ? await db.get("SELECT bytes_in + bytes_out AS total FROM usage_monthly WHERE user_id = ? AND month = ?", [userId, month])
+        ? await db.get("SELECT bytes_in + bytes_out AS total FROM org_usage_monthly WHERE org_id = ? AND month = ?", [orgId, month])
         : null;
       const persisted = row ? row.total : 0;
       dbTotals.set(key, (dbTotals.get(key) || 0) + persisted);
@@ -88,7 +88,7 @@ function createUsageMeter({
 
   async function periodUsage(session) {
     const q = quotaKey(session);
-    if (q.store === "db") return loadDbTotal(q.userId, q.month);
+    if (q.store === "db") return loadDbTotal(q.orgId, q.month);
     return memoryTotals.get(q.key) || 0;
   }
 
@@ -102,7 +102,7 @@ function createUsageMeter({
   function track(session) {
     tracked.set(session, { lastSent: session.bytesSent || 0, lastReceived: session.bytesReceived || 0 });
     const q = quotaKey(session);
-    if (q.store === "db") loadDbTotal(q.userId, q.month).catch((error) => log?.warn("usage load failed", { error }));
+    if (q.store === "db") loadDbTotal(q.orgId, q.month).catch((error) => log?.warn("usage load failed", { error }));
   }
 
   // Every tracked session counts once at close, including one whose bytes
@@ -126,7 +126,7 @@ function createUsageMeter({
     return delta;
   }
 
-  const pendingDb = new Map(); // "userId|month" -> { userId, month, in, out, sessions }
+  const pendingDb = new Map(); // "orgId|month" -> { orgId, month, in, out, sessions }
 
   function applyDelta(session, delta, closing = false) {
     const tier = tierFor(session);
@@ -135,8 +135,8 @@ function createUsageMeter({
     const q = quotaKey(session);
     const total = delta.in + delta.out;
     if (q.store === "db") {
-      const pendingKey = `${q.userId}|${q.month}`;
-      const pending = pendingDb.get(pendingKey) || { userId: q.userId, month: q.month, in: 0, out: 0, sessions: 0 };
+      const pendingKey = `${q.orgId}|${q.month}`;
+      const pending = pendingDb.get(pendingKey) || { orgId: q.orgId, month: q.month, in: 0, out: 0, sessions: 0 };
       pending.in += delta.in;
       pending.out += delta.out;
       if (closing) pending.sessions += 1;
@@ -164,18 +164,18 @@ function createUsageMeter({
           await db.transaction(async () => {
             for (const row of rows) {
               await db.run(
-                "INSERT INTO usage_monthly (user_id, month, bytes_in, bytes_out, sessions) VALUES (?, ?, ?, ?, ?) " +
-                "ON CONFLICT(user_id, month) DO UPDATE SET bytes_in = bytes_in + excluded.bytes_in, " +
+                "INSERT INTO org_usage_monthly (org_id, month, bytes_in, bytes_out, sessions) VALUES (?, ?, ?, ?, ?) " +
+                "ON CONFLICT(org_id, month) DO UPDATE SET bytes_in = bytes_in + excluded.bytes_in, " +
                 "bytes_out = bytes_out + excluded.bytes_out, sessions = sessions + excluded.sessions",
-                [row.userId, row.month, row.in, row.out, row.sessions],
+                [row.orgId, row.month, row.in, row.out, row.sessions],
               );
             }
           });
         } catch (error) {
           // The transaction rolled back: put the rows back for the next flush.
           for (const row of rows) {
-            const key = `${row.userId}|${row.month}`;
-            const pending = pendingDb.get(key) || { userId: row.userId, month: row.month, in: 0, out: 0, sessions: 0 };
+            const key = `${row.orgId}|${row.month}`;
+            const pending = pendingDb.get(key) || { orgId: row.orgId, month: row.month, in: 0, out: 0, sessions: 0 };
             pending.in += row.in;
             pending.out += row.out;
             pending.sessions += row.sessions;
@@ -202,11 +202,11 @@ function createUsageMeter({
     return flushing;
   }
 
-  async function monthly(userId, { months = 12 } = {}) {
+  async function monthly(orgId, { months = 12 } = {}) {
     if (!db) return [];
     const rows = await db.all(
-      "SELECT month, bytes_in AS bytesIn, bytes_out AS bytesOut, sessions FROM usage_monthly WHERE user_id = ? ORDER BY month DESC LIMIT ?",
-      [userId, months],
+      "SELECT month, bytes_in AS bytesIn, bytes_out AS bytesOut, sessions FROM org_usage_monthly WHERE org_id = ? ORDER BY month DESC LIMIT ?",
+      [orgId, months],
     );
     return rows;
   }

@@ -170,7 +170,16 @@ function createAuditLog({
       where.push("started_at <= ? AND (ended_at IS NULL OR ended_at >= ?)");
       params.push(at + windowMs, at - windowMs);
     }
-    if (owner) {
+    const orgMatch = owner && /^org:(\d+)$/.exec(owner);
+    if (orgMatch) {
+      // Rows written before orgs existed are keyed "user:<id>"; a personal
+      // org also owns its user's earlier rows.
+      where.push(
+        "(owner = ? OR owner IN (SELECT 'user:' || m.user_id FROM memberships m JOIN orgs o ON o.id = m.org_id " +
+          "WHERE o.id = ? AND o.personal = 1))",
+      );
+      params.push(owner, Number(orgMatch[1]));
+    } else if (owner) {
       where.push("owner = ?");
       params.push(owner);
     }

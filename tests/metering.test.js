@@ -64,7 +64,7 @@ test("audit log batches inserts, updates rows on finish, queries and prunes", as
   await database.close();
 });
 
-test("usage meter accumulates per-user months in SQLite and anon days in memory, and enforces quotas", async () => {
+test("usage meter accumulates per-org months in SQLite and anon days in memory, and enforces quotas", async () => {
   const database = await db();
   const tiers = resolveTiers({ user: { quotaBytes: 1000 }, anon: { quotaBytes: 50 } }, {
     rateLimitBps: 1, dnsServerIp: "8.8.8.8", maxUdpFlows: 8, maxConnectionsPerIp: 2, enableVmToVm: false,
@@ -77,7 +77,7 @@ test("usage meter accumulates per-user months in SQLite and anon days in memory,
     onQuotaExceeded: (session) => exceeded.push(session.sessionId),
   });
 
-  const userSession = { sessionId: "u1", identity: { kind: "user", owner: "user:7", userId: 7, tier: "user" }, clientIP: "1.1.1.1", bytesSent: 0, bytesReceived: 0 };
+  const userSession = { sessionId: "u1", identity: { kind: "user", owner: "org:7", orgId: 7, userId: 7, tier: "user" }, clientIP: "1.1.1.1", bytesSent: 0, bytesReceived: 0 };
   const anonSession = { sessionId: "a1", identity: { kind: "anon", owner: "anon:x", tier: "anon" }, clientIP: "9.9.9.9", bytesSent: 0, bytesReceived: 0 };
   usage.track(userSession);
   usage.track(anonSession);
@@ -98,7 +98,7 @@ test("usage meter accumulates per-user months in SQLite and anon days in memory,
   assert.equal(await usage.isOverQuota({ identity: userSession.identity, clientIP: "1.1.1.1" }), true);
   assert.equal(await usage.isOverQuota({ identity: anonSession.identity, clientIP: "9.9.9.9" }), true);
   assert.equal(await usage.isOverQuota({ identity: { kind: "anon", owner: "anon:y", tier: "anon" }, clientIP: "9.9.9.10" }), false);
-  assert.equal(await usage.isOverQuota({ identity: { kind: "operator", owner: "user:1", userId: 1, tier: "operator" }, clientIP: "1.1.1.1" }), false);
+  assert.equal(await usage.isOverQuota({ identity: { kind: "operator", owner: "org:1", orgId: 1, userId: 1, tier: "operator" }, clientIP: "1.1.1.1" }), false);
 
   // Untrack records the final delta and session count; a new day resets anon usage.
   userSession.bytesSent = 960;

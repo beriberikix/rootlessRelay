@@ -118,6 +118,17 @@ function createSessionRegistry({ ctx, tiers }) {
       }
       return count;
     },
+    // Closes every session a user opened, whichever org it ran in.
+    killUser(userId, code = 1008, reason = "account suspended") {
+      let count = 0;
+      for (const session of sessions.values()) {
+        if (session.identity && session.identity.userId === userId) {
+          session.ws.close(code, reason);
+          count += 1;
+        }
+      }
+      return count;
+    },
     killOwner(owner, code = 1008, reason = "account suspended") {
       const set = byOwner.get(owner);
       if (!set) return 0;
