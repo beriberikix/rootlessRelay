@@ -149,6 +149,14 @@ function createOrgStore(db, { now = Date.now } = {}) {
       return (await db.all("SELECT * FROM orgs ORDER BY id")).map(publicOrg);
     },
 
+    // Every org with its member count, for the operator panel.
+    async listWithCounts() {
+      const rows = await db.all(
+        "SELECT o.*, (SELECT COUNT(*) FROM memberships m WHERE m.org_id = o.id) AS member_count FROM orgs o ORDER BY o.id",
+      );
+      return rows.map((row) => ({ ...publicOrg(row), memberCount: row.member_count }));
+    },
+
     // Orgs a user belongs to, with their role in each.
     async listForUser(userId) {
       const rows = await db.all(
@@ -198,6 +206,12 @@ function createOrgStore(db, { now = Date.now } = {}) {
     async setTier(orgId, tier) {
       if (typeof tier !== "string" || !tier) throw new RangeError("tier is required");
       const result = await db.run("UPDATE orgs SET tier = ? WHERE id = ?", [tier, orgId]);
+      // A personal org's tier is also shown on its owner's account.
+      await db.run(
+        "UPDATE users SET tier = ? WHERE id IN (SELECT m.user_id FROM memberships m JOIN orgs o ON o.id = m.org_id " +
+          "WHERE o.id = ? AND o.personal = 1 AND m.role = 'owner')",
+        [tier, orgId],
+      );
       return result.changes > 0;
     },
 

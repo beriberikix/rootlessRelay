@@ -85,6 +85,10 @@
     .badge.pending, .badge.open { background-color: var(--ctp-yellow); color: var(--ctp-crust); }
     .badge.redeemed { background-color: var(--ctp-green); color: var(--ctp-crust); }
     .badge.revoked, .badge.expired { background-color: var(--ctp-surface2); color: var(--ctp-text); }
+    .small-select { padding: 2px 6px; }
+    .badge.suspended { background-color: var(--ctp-red); color: var(--ctp-crust); }
+    .badge.personal { background-color: var(--ctp-surface2); color: var(--ctp-text); }
+    .badge.shared { background-color: var(--ctp-blue); color: var(--ctp-crust); }
     .badge.deny { background-color: var(--ctp-red); color: var(--ctp-crust); }
     .badge.allow { background-color: var(--ctp-surface2); color: var(--ctp-text); }
 
@@ -231,6 +235,7 @@
     <div class="section-tabs" id="section-tabs">
       <button type="button" class="section-tab active" data-section="sessions">Sessions</button>
       <button type="button" class="section-tab" data-section="users">Users &amp; Tokens</button>
+      <button type="button" class="section-tab" data-section="orgs">Orgs</button>
       <button type="button" class="section-tab" data-section="invites">Invites</button>
       <button type="button" class="section-tab" data-section="audit">Audit Log</button>
       <button type="button" class="section-tab" data-section="rules" id="rules-tab">Inbound Rules</button>
@@ -312,6 +317,48 @@
         <tbody></tbody>
       </table>
       <div id="users-empty" class="empty hidden">No users yet.</div>
+    </section>
+
+    <!-- Orgs -->
+    <section id="section-orgs" class="panel hidden">
+      <h2>Organizations</h2>
+      <p class="muted">Every account has a personal org. Shared orgs are created here during the beta; members share the org's network, session limit, tier and quota.</p>
+      <form id="create-org-form" class="toolbar">
+        <div class="form-group">
+          <label for="new-org-name">Name</label>
+          <input id="new-org-name" class="catppuccin-input" type="text" maxlength="100" required autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label for="new-org-owner">Owner</label>
+          <select id="new-org-owner" class="catppuccin-input" required></select>
+        </div>
+        <div class="form-group">
+          <label for="new-org-tier">Tier</label>
+          <select id="new-org-tier" class="catppuccin-input"></select>
+        </div>
+        <div class="form-group">
+          <label>&nbsp;</label>
+          <button type="submit" class="success">Create org</button>
+        </div>
+      </form>
+      <table id="orgs">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Name</th>
+            <th>Kind</th>
+            <th>Tier</th>
+            <th>Status</th>
+            <th>Members</th>
+            <th>Sessions</th>
+            <th>Created</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id="orgs-empty" class="empty hidden">No organizations yet.</div>
+      <div id="org-detail" class="hidden"></div>
     </section>
 
     <!-- Invites -->
@@ -682,10 +729,10 @@
     function showSection(name) {
       activeSection = name;
       $$('.section-tab').forEach((tab) => tab.classList.toggle('active', tab.dataset.section === name));
-      for (const section of ['sessions', 'users', 'invites', 'audit', 'rules']) {
+      for (const section of ['sessions', 'users', 'orgs', 'invites', 'audit', 'rules']) {
         $(`#section-${section}`).classList.toggle('hidden', section !== name);
       }
-      const loaders = { sessions: fetchSessions, users: loadUsers, invites: loadInvites, audit: loadAudit, rules: loadRules };
+      const loaders = { sessions: fetchSessions, users: loadUsers, orgs: loadOrgs, invites: loadInvites, audit: loadAudit, rules: loadRules };
       loaders[name]().catch((error) => showToaster(error.message, true));
     }
 
@@ -974,7 +1021,7 @@
             break;
           }
           case 'revoke':
-            await apiFetch(`/api/tokens/${button.dataset.token}`, { method: 'DELETE' });
+            await apiJson(`/api/tokens/${button.dataset.token}`, { method: 'DELETE' });
             showToaster('Token revoked');
             break;
           case 'ban':
@@ -998,7 +1045,7 @@
           case 'delete': {
             const typed = window.prompt(`Delete ${button.dataset.username}, their tokens and usage? Type the username to confirm.`);
             if (typed !== button.dataset.username) return;
-            await apiFetch(`/api/users/${userId}`, { method: 'DELETE' });
+            await apiJson(`/api/users/${userId}`, { method: 'DELETE' });
             expandedUsers.delete(Number(userId));
             showToaster('User deleted');
             break;
@@ -1085,6 +1132,215 @@
     });
 
     // ---------- audit ---------------------------------------------------------
+
+    // ---------- orgs ----------------------------------------------------------
+
+    const ORG_ROLES = ['owner', 'admin', 'member', 'billing', 'read_only'];
+    let openOrgId = null;
+
+    function optionList(values, selected) {
+      return values.map((value) => el('option', { value, text: value, selected: value === selected }));
+    }
+
+    async function loadOrgs() {
+      const [orgs, users] = await Promise.all([apiJson('/api/orgs'), apiJson('/api/users')]);
+      const ownerSelect = $('#new-org-owner');
+      ownerSelect.innerHTML = '';
+      for (const user of users) ownerSelect.appendChild(el('option', { value: String(user.id), text: `${user.username} (#${user.id})` }));
+      const tierSelect = $('#new-org-tier');
+      tierSelect.innerHTML = '';
+      for (const tier of config.tiers || []) tierSelect.appendChild(el('option', { value: tier, text: tier, selected: tier === 'user' }));
+
+      const tbody = $('#orgs tbody');
+      tbody.innerHTML = '';
+      for (const org of orgs) {
+        const tierPicker = el('select', { class: 'catppuccin-input small-select', 'data-action': 'org-tier', 'data-org': org.id },
+          optionList(config.tiers || [org.tier], org.tier));
+        const actions = [
+          el('button', { type: 'button', class: 'small secondary', text: openOrgId === org.id ? 'Hide' : 'Details', 'data-action': 'org-details', 'data-org': org.id }),
+          el('button', {
+            type: 'button', class: org.status === 'active' ? 'small danger' : 'small',
+            text: org.status === 'active' ? 'Suspend' : 'Unsuspend',
+            'data-action': org.status === 'active' ? 'org-suspend' : 'org-unsuspend', 'data-org': org.id, 'data-name': org.name,
+          }),
+        ];
+        if (!org.personal) actions.push(el('button', { type: 'button', class: 'small danger', text: 'Delete', 'data-action': 'org-delete', 'data-org': org.id, 'data-name': org.name }));
+        tbody.appendChild(el('tr', {}, [
+          el('td', { class: 'num', text: String(org.id) }),
+          el('td', { text: org.name }),
+          el('td', {}, [badge(org.personal ? 'personal' : 'shared', org.personal ? 'personal' : 'shared')]),
+          el('td', {}, [tierPicker]),
+          el('td', {}, [badge(org.status, org.status === 'active' ? 'active' : 'suspended')]),
+          el('td', { class: 'num', text: String(org.memberCount) }),
+          el('td', { class: 'num', text: String(org.sessions) }),
+          el('td', { text: formatTime(org.createdAt) }),
+          el('td', {}, actions),
+        ]));
+      }
+      emptyState('#orgs', '#orgs-empty', orgs.length === 0);
+      if (openOrgId !== null) await renderOrgDetail(openOrgId, users);
+      else $('#org-detail').classList.add('hidden');
+    }
+
+    async function renderOrgDetail(orgId, knownUsers) {
+      const holder = $('#org-detail');
+      let org;
+      try {
+        org = await apiJson(`/api/orgs/${orgId}`);
+      } catch (error) {
+        openOrgId = null;
+        holder.classList.add('hidden');
+        return;
+      }
+      const users = knownUsers || await apiJson('/api/users');
+      holder.innerHTML = '';
+      holder.classList.remove('hidden');
+
+      const memberRows = org.members.map((member) => el('tr', {}, [
+        el('td', { text: member.username }),
+        el('td', {}, [el('select', { class: 'catppuccin-input small-select', 'data-action': 'member-role', 'data-org': org.id, 'data-user': member.userId },
+          optionList(ORG_ROLES, member.role))]),
+        el('td', { text: formatTime(member.createdAt) }),
+        el('td', {}, [el('button', { type: 'button', class: 'small danger', text: 'Remove', 'data-action': 'member-remove', 'data-org': org.id, 'data-user': member.userId, 'data-username': member.username })]),
+      ]));
+      const memberIds = new Set(org.members.map((m) => m.userId));
+      const addUser = el('select', { class: 'catppuccin-input', id: 'add-member-user' },
+        users.filter((u) => !memberIds.has(u.id)).map((u) => el('option', { value: String(u.id), text: `${u.username} (#${u.id})` })));
+      const addRole = el('select', { class: 'catppuccin-input', id: 'add-member-role' }, optionList(ORG_ROLES, 'member'));
+      const addForm = el('form', { class: 'toolbar', id: 'add-member-form', 'data-org': org.id }, [
+        el('div', { class: 'form-group' }, [el('label', { text: 'Add member', htmlFor: 'add-member-user' }), addUser]),
+        el('div', { class: 'form-group' }, [el('label', { text: 'Role', htmlFor: 'add-member-role' }), addRole]),
+        el('div', { class: 'form-group' }, [el('label', { text: '\u00a0' }), el('button', { type: 'submit', class: 'success', text: 'Add' })]),
+      ]);
+
+      const tokenRows = org.tokens.map((token) => el('tr', {}, [
+        el('td', { text: token.name }),
+        el('td', { class: 'mono', text: `rr_${token.prefix}…` }),
+        el('td', { text: token.username }),
+        el('td', { text: token.lastUsedAt ? formatTime(token.lastUsedAt) : 'never' }),
+        el('td', {}, [token.revokedAt ? badge('revoked', 'revoked')
+          : el('button', { type: 'button', class: 'small danger', text: 'Revoke', 'data-action': 'org-token-revoke', 'data-token': token.id })]),
+      ]));
+      const inviteRows = org.invites.map((invite) => el('tr', {}, [
+        el('td', { text: invite.email }),
+        el('td', { text: invite.role }),
+        el('td', {}, [badge(invite.state, invite.state)]),
+        el('td', { text: formatTime(invite.expiresAt) }),
+      ]));
+      const table = (headers, rows, emptyText) => rows.length === 0
+        ? el('p', { class: 'muted', text: emptyText })
+        : el('table', {}, [el('thead', {}, [el('tr', {}, headers.map((h) => el('th', { text: h })))]), el('tbody', {}, rows)]);
+
+      holder.appendChild(el('div', { class: 'panel' }, [
+        el('h3', { text: `${org.name} (#${org.id})` }),
+        el('h4', { text: 'Members' }),
+        table(['User', 'Role', 'Joined', 'Actions'], memberRows, 'No members.'),
+        addForm,
+        el('h4', { text: 'API tokens running as this org' }),
+        table(['Name', 'Token', 'Created by', 'Last used', 'Actions'], tokenRows, 'No tokens.'),
+        el('h4', { text: 'Invitations' }),
+        table(['Email', 'Role', 'State', 'Expires'], inviteRows, 'No invitations.'),
+      ]));
+    }
+
+    $('#create-org-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      try {
+        const org = await postJson('/api/orgs', {
+          name: $('#new-org-name').value.trim(),
+          ownerUserId: Number($('#new-org-owner').value),
+          tier: $('#new-org-tier').value,
+        });
+        $('#create-org-form').reset();
+        openOrgId = org.id;
+        showToaster(`Created ${org.name}`);
+        await loadOrgs();
+      } catch (error) {
+        showToaster(error.message, true);
+      }
+    });
+
+    $('#section-orgs').addEventListener('change', async (event) => {
+      const select = event.target.closest('select[data-action]');
+      if (!select) return;
+      const orgId = select.dataset.org;
+      try {
+        if (select.dataset.action === 'org-tier') {
+          if (!window.confirm(`Set this org's tier to ${select.value}? Limits apply to all its members.`)) { await loadOrgs(); return; }
+          await postJson(`/api/orgs/${orgId}/tier`, { tier: select.value });
+          showToaster('Tier updated');
+        } else if (select.dataset.action === 'member-role') {
+          if (!window.confirm(`Change this member's role to ${select.value}?`)) { await loadOrgs(); return; }
+          await postJson(`/api/orgs/${orgId}/members/${select.dataset.user}/role`, { role: select.value });
+          showToaster('Role updated');
+        } else {
+          return;
+        }
+        await loadOrgs();
+      } catch (error) {
+        showToaster(error.message, true);
+        await loadOrgs().catch(() => {});
+      }
+    });
+
+    $('#section-orgs').addEventListener('submit', async (event) => {
+      const form = event.target.closest('#add-member-form');
+      if (!form) return;
+      event.preventDefault();
+      try {
+        await postJson(`/api/orgs/${form.dataset.org}/members`, {
+          userId: Number($('#add-member-user').value),
+          role: $('#add-member-role').value,
+        });
+        showToaster('Member added');
+        await loadOrgs();
+      } catch (error) {
+        showToaster(error.message, true);
+      }
+    });
+
+    $('#section-orgs').addEventListener('click', async (event) => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      const orgId = Number(button.dataset.org);
+      try {
+        switch (button.dataset.action) {
+          case 'org-details':
+            openOrgId = openOrgId === orgId ? null : orgId;
+            await loadOrgs();
+            return;
+          case 'org-suspend':
+            if (!window.confirm(`Suspend ${button.dataset.name} and end its live sessions?`)) return;
+            await postJson(`/api/orgs/${orgId}/suspend`, {});
+            showToaster('Org suspended');
+            break;
+          case 'org-unsuspend':
+            await postJson(`/api/orgs/${orgId}/unsuspend`, {});
+            showToaster('Org unsuspended');
+            break;
+          case 'org-delete':
+            if (!window.confirm(`Delete ${button.dataset.name}, its tokens and usage, and end its sessions? This cannot be undone.`)) return;
+            await apiJson(`/api/orgs/${orgId}`, { method: 'DELETE' });
+            if (openOrgId === orgId) openOrgId = null;
+            showToaster('Org deleted');
+            break;
+          case 'member-remove':
+            if (!window.confirm(`Remove ${button.dataset.username} from this org? Their tokens in it are revoked and their sessions end.`)) return;
+            await apiJson(`/api/orgs/${orgId}/members/${button.dataset.user}`, { method: 'DELETE' });
+            showToaster('Member removed');
+            break;
+          case 'org-token-revoke':
+            await apiJson(`/api/tokens/${button.dataset.token}`, { method: 'DELETE' });
+            showToaster('Token revoked');
+            break;
+          default:
+            return;
+        }
+        await loadOrgs();
+      } catch (error) {
+        showToaster(error.message, true);
+      }
+    });
 
     async function loadAudit() {
       const params = new URLSearchParams();

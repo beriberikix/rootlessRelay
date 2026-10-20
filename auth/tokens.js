@@ -94,6 +94,26 @@ function createApiTokenStore(db, { now = Date.now, randomBytes = crypto.randomBy
       return result.changes > 0;
     },
 
+    // Every token that runs as the org, with who minted it (operator panel).
+    async listForOrg(orgId) {
+      const rows = await db.all(
+        "SELECT t.id, t.name, t.token_prefix, t.user_id, u.username, t.created_at, t.last_used_at, t.expires_at, t.revoked_at " +
+          "FROM api_tokens t JOIN users u ON u.id = t.user_id WHERE t.org_id = ? ORDER BY t.id",
+        [orgId],
+      );
+      return rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        prefix: row.token_prefix,
+        userId: row.user_id,
+        username: row.username,
+        createdAt: row.created_at,
+        lastUsedAt: row.last_used_at,
+        expiresAt: row.expires_at,
+        revokedAt: row.revoked_at,
+      }));
+    },
+
     async listForUser(userId) {
       const rows = await db.all(
         "SELECT id, name, token_prefix, created_at, last_used_at, expires_at, revoked_at FROM api_tokens WHERE user_id = ? ORDER BY id",
