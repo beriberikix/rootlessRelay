@@ -24,6 +24,10 @@
 - Account API: operator reach (any org's details, members and invitations)
   needs a sign-in. An operator's API token now acts like any member's, so a
   leaked VM token no longer reads every org. relaynet audit 2026-10-21, AU-2.
+- Account API: a JSON body that is not an object (`null`, an array, a bare
+  value) is a 400 `invalid-json`, and every 500 answers `internal-error`
+  with the detail kept in the log; before, handlers' TypeErrors and SQLite
+  messages reached the client. relaynet audit 2026-10-21, AU-4.
 
 ### Fixed
 
@@ -36,6 +40,9 @@
   database error (for example `SQLITE_BUSY`) made every later session open
   and `/api/me` for that org fail until restart. relaynet audit 2026-10-21,
   MT-2.
+- Usage that arrives after its org was deleted (sessions close after the
+  rows go) is dropped instead of re-creating an `org_usage_monthly` row for
+  the deleted org. relaynet audit 2026-10-21, MT-3.
 
 ### Added (fork: organizations)
 

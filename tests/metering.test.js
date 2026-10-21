@@ -66,6 +66,7 @@ test("audit log batches inserts, updates rows on finish, queries and prunes", as
 
 test("usage meter accumulates per-org months in SQLite and anon days in memory, and enforces quotas", async () => {
   const database = await db();
+  await database.run("INSERT INTO orgs (id, name, personal, tier, created_at) VALUES (7, 'o', 0, 'user', '2026-10-01')");
   const tiers = resolveTiers({ user: { quotaBytes: 1000 }, anon: { quotaBytes: 50 } }, {
     rateLimitBps: 1, dnsServerIp: "8.8.8.8", maxUdpFlows: 8, maxConnectionsPerIp: 2, enableVmToVm: false,
   });
@@ -150,6 +151,29 @@ test("a failed usage read is retried, not remembered", async () => {
   const identity = { kind: "user", owner: "org:5", orgId: 5, userId: 1, tier: "user" };
   await assert.rejects(usage.isOverQuota({ identity, clientIP: "1.1.1.1" }), /SQLITE_BUSY/);
   assert.equal(await usage.isOverQuota({ identity, clientIP: "1.1.1.1" }), true, "the persisted 1000 bytes count");
+  usage.close();
+  await database.close();
+});
+
+test("usage for a deleted org is dropped, not written back", async () => {
+  const database = await db();
+  await database.run("INSERT INTO orgs (id, name, personal, tier, created_at) VALUES (8, 'gone', 0, 'user', '2026-10-01')");
+  const tiers = resolveTiers(null, { rateLimitBps: 1, dnsServerIp: "8.8.8.8", maxUdpFlows: 8, maxConnectionsPerIp: 2, enableVmToVm: false });
+  const usage = createUsageMeter({ db: database, tiers, now: () => Date.UTC(2026, 9, 14, 12), flushIntervalMs: 1e9, log: quietLog });
+  const session = { sessionId: "s", identity: { kind: "user", owner: "org:8", orgId: 8, userId: 1, tier: "user" }, clientIP: "1.1.1.1", bytesSent: 0, bytesReceived: 0 };
+  usage.track(session);
+  session.bytesSent = 500;
+  await usage.flush();
+  assert.equal((await database.get("SELECT bytes_out FROM org_usage_monthly WHERE org_id = 8")).bytes_out, 500);
+
+  // The org is deleted while the session is still open; its last bytes and
+  // the session count arrive afterwards.
+  await database.run("DELETE FROM org_usage_monthly WHERE org_id = 8");
+  await database.run("DELETE FROM orgs WHERE id = 8");
+  session.bytesSent = 900;
+  usage.untrack(session);
+  await usage.flush();
+  assert.equal(await database.get("SELECT * FROM org_usage_monthly WHERE org_id = 8"), undefined);
   usage.close();
   await database.close();
 });

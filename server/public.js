@@ -130,11 +130,20 @@ function readJsonBody(req, { limit = 16 * 1024 } = {}) {
         resolve({});
         return;
       }
+      // Every route takes an object; null, arrays and bare values are 400s
+      // here rather than TypeErrors in the handlers.
+      let body;
       try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       } catch (_error) {
         reject(new AuthError(400, "invalid-json"));
+        return;
       }
+      if (body === null || typeof body !== "object" || Array.isArray(body)) {
+        reject(new AuthError(400, "invalid-json"));
+        return;
+      }
+      resolve(body);
     });
     req.on("error", reject);
   });
@@ -227,7 +236,8 @@ function createPublicServer({
       } catch (error) {
         const status = error.status || 500;
         if (status >= 500) log?.error("anon token error", { error });
-        writeJson(res, status, { error: error.code || error.message || "error" }, corsHeaders(req));
+        const message = status >= 500 ? "internal-error" : error.code || error.message || "error";
+        writeJson(res, status, { error: message }, corsHeaders(req));
       }
       return;
     }
