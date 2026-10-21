@@ -23,13 +23,14 @@ const {
 
 const NETWORK = { skip: process.env.RUN_NETWORK_TESTS !== "1", timeout: 20000 };
 
-function buildDHCPDiscover(vmMAC) {
+// `clientMAC` is the MAC inside the DHCP message, normally the frame's own.
+function buildDHCPDiscover(vmMAC, clientMAC = vmMAC) {
   const dhcp = Buffer.alloc(244);
   dhcp[0] = 1;
   dhcp[1] = 1;
   dhcp[2] = 6;
   dhcp.writeUInt32BE(0x12345678, 4);
-  vmMAC.copy(dhcp, 28);
+  clientMAC.copy(dhcp, 28);
   dhcp.writeUInt32BE(0x63825363, 236);
   dhcp[240] = 53;
   dhcp[241] = 1;
@@ -656,4 +657,95 @@ test("healthz and graceful shutdown: clients get 1001 and the process exits 0 wi
   assert.equal(exit.code, 0);
   assert.ok(Date.now() - started < 1000, "exited within the SIGKILL window");
   await relay.close();
+});
+
+// The address a DHCP offer carries (yiaddr).
+function offeredIP(offer) {
+  return Array.from(offer.payload.subarray(16, 20)).join(".");
+}
+
+const isOffer = (f) => f.kind === "udp" && f.srcPort === 67;
+
+// A three-address pool, no address holds, several anonymous sessions from
+// one test client.
+const SMALL_POOL = {
+  hosted: true,
+  env: {
+    DHCP_START: "15",
+    DHCP_END: "17",
+    ADDRESS_HOLD_MS: "0",
+    TIERS_JSON: JSON.stringify({ anon: { maxSessionsPerIP: 10 } }),
+  },
+};
+
+async function anonSession(relay) {
+  const { ws, status } = await openWebSocket(relay.wsPort, { token: await anonToken(relay) });
+  assert.equal(status, 101);
+  return { ws, frames: new FrameQueue(ws) };
+}
+
+test("hosted mode: one session cannot lease the pool with other client MACs", NETWORK, async () => {
+  const relay = await startRelay(SMALL_POOL);
+  try {
+    const attacker = await anonSession(relay);
+    const attackerMAC = macFromNumber(10);
+    attacker.ws.send(buildDHCPDiscover(attackerMAC));
+    const own = offeredIP(await attacker.frames.waitFor(isOffer));
+    for (let i = 0; i < 8; i += 1) attacker.ws.send(buildDHCPDiscover(attackerMAC, macFromNumber(100 + i)));
+    assert.equal(await attacker.frames.expectNone(isOffer, 200), true, "no offers for foreign client MACs");
+
+    // The other two addresses are still there for other sessions.
+    const leased = new Set([own]);
+    for (const n of [11, 12]) {
+      const other = await anonSession(relay);
+      other.ws.send(buildDHCPDiscover(macFromNumber(n)));
+      leased.add(offeredIP(await other.frames.waitFor(isOffer)));
+    }
+    assert.equal(leased.size, 3);
+
+    // Closing the first session returns its address to the pool.
+    attacker.ws.close();
+    await delay(100);
+    const next = await anonSession(relay);
+    next.ws.send(buildDHCPDiscover(macFromNumber(13)));
+    assert.equal(offeredIP(await next.frames.waitFor(isOffer)), own);
+  } finally {
+    await relay.close();
+  }
+});
+
+test("hosted mode: DHCP for another session's MAC does not take its address", NETWORK, async () => {
+  const relay = await startRelay(SMALL_POOL);
+  try {
+    const victim = await anonSession(relay);
+    const victimMAC = macFromNumber(20);
+    victim.ws.send(buildDHCPDiscover(victimMAC));
+    const victimIP = offeredIP(await victim.frames.waitFor(isOffer));
+
+    const attacker = await anonSession(relay);
+    const attackerMAC = macFromNumber(21);
+    attacker.ws.send(buildDHCPDiscover(attackerMAC, victimMAC));
+    assert.equal(await attacker.frames.expectNone(isOffer, 200), true);
+    attacker.ws.send(buildDHCPDiscover(attackerMAC));
+    assert.notEqual(offeredIP(await attacker.frames.waitFor(isOffer)), victimIP);
+
+    const sessions = await sessionsByMac(relay, await relay.adminCookie());
+    assert.equal(sessions.get(macString(victimMAC)).vmIP, victimIP, "victim keeps its address");
+  } finally {
+    await relay.close();
+  }
+});
+
+test("hosted mode: a second DHCP exchange returns the session's address", NETWORK, async () => {
+  const relay = await startRelay(SMALL_POOL);
+  try {
+    const { ws, frames } = await anonSession(relay);
+    const vmMAC = macFromNumber(30);
+    ws.send(buildDHCPDiscover(vmMAC));
+    const first = offeredIP(await frames.waitFor(isOffer));
+    ws.send(buildDHCPDiscover(vmMAC));
+    assert.equal(offeredIP(await frames.waitFor(isOffer)), first);
+  } finally {
+    await relay.close();
+  }
 });

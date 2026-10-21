@@ -264,14 +264,20 @@ function allocateIP(mac) {
   throw new Error("No available IPs in pool");
 }
 
-function releaseIP(mac) {
-  const ip = macToIP.get(mac);
-  if (ip) {
-    const lastOctet = parseInt(ip.split(".")[3]);
-    usedIPs.delete(lastOctet);
-    macToIP.delete(mac);
+// Releases what a closing session holds: the address bound to its MAC and
+// the address it used, unless another session has since taken either.
+function releaseSessionIPs(session) {
+  const ips = new Set([session.vmIP, session.vmMAC && macToIP.get(session.vmMAC)]);
+  for (const ip of ips) {
+    if (!ip) continue;
+    const holder = ipToSession.get(ip);
+    if (holder && holder !== session) continue;
+    for (const [mac, bound] of macToIP) {
+      if (bound === ip) macToIP.delete(mac);
+    }
     ipToSession.delete(ip);
-    console.log(`🔓 Released ${ip} from MAC ${mac}`);
+    usedIPs.delete(parseInt(ip.split(".")[3]));
+    console.log(`🔓 Released ${ip}`);
   }
 }
 
@@ -2304,9 +2310,11 @@ class VMSession {
 
     const xid = udp.readUInt32BE(4);
     const clientMAC = udp.slice(28, 34);
-    const clientMACStr = Array.from(clientMAC).map((b) =>
-      b.toString(16).padStart(2, "0")
-    ).join(":");
+    // A session leases one address, for the MAC its frames come from. A
+    // client MAC in the message that differs from it would let one session
+    // reserve the whole pool, or take the address bound to another MAC.
+    if (!this.vmMACBytes || !clientMAC.equals(this.vmMACBytes)) return;
+    const clientMACStr = this.vmMAC;
 
     let msgType = 0;
     let off = 240;
@@ -2331,9 +2339,11 @@ class VMSession {
     // Get or allocate IP for this MAC
     let assignedIP;
     try {
-      this.policy.reclaimAddress(this, clientMACStr); // HOSTED: address hold
-      assignedIP = allocateIP(clientMACStr);
-      if (!this.vmIP) {
+      if (this.vmIP) {
+        assignedIP = this.vmIP;
+      } else {
+        this.policy.reclaimAddress(this, clientMACStr); // HOSTED: address hold
+        assignedIP = allocateIP(clientMACStr);
         this.vmIP = assignedIP;
         ipToSession.set(this.vmIP, this);
       }
@@ -2472,8 +2482,8 @@ class VMSession {
   close() {
     // Release IP when session closes
     // HOSTED: or hold it for the owner's reconnect.
-    if (this.vmMAC && !this.policy.holdAddress(this)) {
-      releaseIP(this.vmMAC);
+    if ((this.vmMAC || this.vmIP) && !this.policy.holdAddress(this)) {
+      releaseSessionIPs(this);
     }
 
     this.udpFlows.close();

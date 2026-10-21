@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Security
+
+- DHCP leases one address per session, for the MAC the session's frames come
+  from. A DHCP message whose client MAC differs is ignored; before, one
+  session could lease every pool address with made-up MACs (refusing new
+  sessions for everyone until restart) or take the address bound to another
+  session's MAC. A second exchange returns the session's current address,
+  and closing a session releases every address it held. relaynet audit
+  2026-10-21, DP-1 and DP-2.
+
 ### Added (fork: organizations)
 
 - Organizations own the private network, API tokens, tier and usage; users
