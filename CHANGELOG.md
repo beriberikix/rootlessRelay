@@ -4,6 +4,12 @@
 
 ### Security
 
+- Hosted mode denies UDP to reflector services (QOTD, chargen, portmapper,
+  NetBIOS, SNMP, CLDAP, RIP, SSDP, ARD, WS-Discovery, mDNS, Ubiquiti
+  discovery, memcached): VMs have no use for them on the internet, and
+  probing them from the relay's address draws abuse reports. DNS and NTP
+  stay open. New `EGRESS_DENY_UDP_PORTS` overrides the list (empty turns it
+  off). relaynet audit 2026-10-21, DP-3.
 - DHCP leases one address per session, for the MAC the session's frames come
   from. A DHCP message whose client MAC differs is ignored; before, one
   session could lease every pool address with made-up MACs (refusing new

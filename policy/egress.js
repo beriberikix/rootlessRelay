@@ -79,11 +79,33 @@ function createLocalAddressSource({ refreshMs = 60000, now = Date.now } = {}) {
   };
 }
 
+// UDP services that answer a small request with a much larger reply, the
+// ones reflection attacks and amplifier scans use. A VM has no reason to
+// reach them on the internet; probing them from the relay's address draws
+// abuse reports. DNS (53) and NTP (123) are left open: VMs need them, and
+// DNS queries are rate limited per session.
+const HOSTED_DENY_UDP_PORTS = [
+  17, // QOTD
+  19, // chargen
+  111, // portmapper
+  137, // NetBIOS name service
+  161, // SNMP
+  389, // CLDAP
+  520, // RIP
+  1900, // SSDP
+  3283, // Apple Remote Desktop
+  3702, // WS-Discovery
+  5353, // mDNS
+  10001, // Ubiquiti discovery
+  11211, // memcached
+];
+
 function createEgressPolicy({
   mode = "open",
   denyCidrs = [],
   allowCidrs = [],
   denyPorts = [],
+  denyUdpPorts = [],
   localAddresses = createLocalAddressSource(),
 } = {}) {
   if (!["open", "hosted"].includes(mode)) {
@@ -95,11 +117,13 @@ function createEgressPolicy({
     ...denyCidrs,
   ].map(parseCidr);
   const deniedPorts = new Set(denyPorts);
+  const deniedUdpPorts = new Set(denyUdpPorts);
 
   function check(dstIP, dstPort, proto = "tcp") {
     const ipInt = ipv4ToInt(dstIP);
     if (ipInt === null) return { allow: false, reason: "invalid-address" };
     if (deniedPorts.has(dstPort)) return { allow: false, reason: "denied-port" };
+    if (proto === "udp" && deniedUdpPorts.has(dstPort)) return { allow: false, reason: "denied-udp-port" };
     for (const range of allow) {
       if (inCidr(ipInt, range)) return { allow: true, reason: "allow-list" };
     }
@@ -119,6 +143,7 @@ function createEgressPolicy({
 
 module.exports = {
   HOSTED_DENY_CIDRS,
+  HOSTED_DENY_UDP_PORTS,
   createEgressPolicy,
   createLocalAddressSource,
   inCidr,
