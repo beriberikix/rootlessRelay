@@ -278,7 +278,14 @@ function attachConnectionHandler(wss, {
       session.handleEthernetFrame(data);
     });
 
-    ws.on("close", (code, reasonBuffer) => {
+    // Releases what the session holds and records its end, once: from the
+    // socket's close event, or earlier from a shutdown that has to finish
+    // this bookkeeping before the final flush (the close event would come
+    // after the process exits).
+    let finished = false;
+    function finish(code, reason) {
+      if (finished) return;
+      finished = true;
       closed = true;
       for (const timer of timers) clearInterval(timer);
       if (idleTimer) clearTimeout(idleTimer);
@@ -301,12 +308,15 @@ function attachConnectionHandler(wss, {
         clientIP,
         owner: identity.owner,
         code,
-        reason: reasonBuffer ? reasonBuffer.toString() : "",
+        reason,
         bytesSent: session.bytesSent,
         bytesReceived: session.bytesReceived,
         durationMs: now() - session.startedAt,
       });
-    });
+    }
+    session.finish = finish;
+
+    ws.on("close", (code, reasonBuffer) => finish(code, reasonBuffer ? reasonBuffer.toString() : ""));
 
     ws.on("error", (error) => {
       log?.warn("websocket error", { sessionId, error });

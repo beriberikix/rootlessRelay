@@ -129,6 +129,31 @@ test("usage meter accumulates per-org months in SQLite and anon days in memory, 
   await database.close();
 });
 
+test("a failed usage read is retried, not remembered", async () => {
+  const database = await db();
+  await database.run("INSERT INTO orgs (id, name, personal, tier, created_at) VALUES (5, 'o', 0, 'user', '2026-10-01')");
+  const clock = Date.UTC(2026, 9, 14, 12);
+  await database.run("INSERT INTO org_usage_monthly (org_id, month, bytes_in, bytes_out, sessions) VALUES (5, ?, 100, 900, 1)", [monthKey(clock)]);
+  const tiers = resolveTiers({ user: { quotaBytes: 1000 } }, {
+    rateLimitBps: 1, dnsServerIp: "8.8.8.8", maxUdpFlows: 8, maxConnectionsPerIp: 2, enableVmToVm: false,
+  });
+  let failNext = true;
+  const flaky = Object.create(database);
+  flaky.get = (...args) => {
+    if (failNext) {
+      failNext = false;
+      return Promise.reject(new Error("SQLITE_BUSY: database is locked"));
+    }
+    return database.get(...args);
+  };
+  const usage = createUsageMeter({ db: flaky, tiers, now: () => clock, flushIntervalMs: 1e9, log: quietLog });
+  const identity = { kind: "user", owner: "org:5", orgId: 5, userId: 1, tier: "user" };
+  await assert.rejects(usage.isOverQuota({ identity, clientIP: "1.1.1.1" }), /SQLITE_BUSY/);
+  assert.equal(await usage.isOverQuota({ identity, clientIP: "1.1.1.1" }), true, "the persisted 1000 bytes count");
+  usage.close();
+  await database.close();
+});
+
 test("metrics can be disabled with no-op instruments", async () => {
   const metrics = createMetrics({ enabled: false });
   metrics.sessionsGauge.inc({ tier: "anon" });

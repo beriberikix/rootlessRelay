@@ -44,6 +44,34 @@ test("SIGTERM closes servers, tells clients to reconnect, flushes, and exits 0",
   assert.deepEqual(proc.exits, [0]);
 });
 
+test("shutdown finishes each session before the flush, once, even if a session leaves the list", async () => {
+  const proc = fakeProcess();
+  const order = [];
+  const sessions = new Set();
+  for (const id of ["a", "b"]) {
+    const session = {
+      ws: fakeWs(),
+      finish(code, reason) {
+        order.push(`finish ${id} ${code} ${reason}`);
+        sessions.delete(session);
+      },
+    };
+    sessions.add(session);
+  }
+  installLifecycle({
+    proc,
+    getSessions: () => sessions.values(),
+    flushers: [async () => { order.push("flush"); }],
+    timeoutMs: 50,
+    hardExitMs: 100,
+    log: quietLog,
+  });
+  proc.emit("SIGTERM");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(order, ["finish a 1001 server shutting down", "finish b 1001 server shutting down", "flush"]);
+  assert.deepEqual(proc.exits, [0]);
+});
+
 test("a slow flusher is abandoned after the timeout and the exit still happens", async () => {
   const proc = fakeProcess();
   installLifecycle({

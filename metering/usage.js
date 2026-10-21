@@ -73,14 +73,24 @@ function createUsageMeter({
     const key = `month:${month}:${orgId}`;
     if (loading.has(key)) return loading.get(key);
     if (dbTotals.has(key)) return dbTotals.get(key);
+    // A failed read is not remembered: the next caller reads again. The
+    // deltas counted meanwhile are dropped from the cache with it (they are
+    // still flushed), since a cache without the persisted total would let
+    // the org past its quota; this cache only gates admission.
     const pending = (async () => {
-      const row = db
-        ? await db.get("SELECT bytes_in + bytes_out AS total FROM org_usage_monthly WHERE org_id = ? AND month = ?", [orgId, month])
-        : null;
-      const persisted = row ? row.total : 0;
-      dbTotals.set(key, (dbTotals.get(key) || 0) + persisted);
-      loading.delete(key);
-      return dbTotals.get(key);
+      try {
+        const row = db
+          ? await db.get("SELECT bytes_in + bytes_out AS total FROM org_usage_monthly WHERE org_id = ? AND month = ?", [orgId, month])
+          : null;
+        const persisted = row ? row.total : 0;
+        dbTotals.set(key, (dbTotals.get(key) || 0) + persisted);
+        return dbTotals.get(key);
+      } catch (error) {
+        dbTotals.delete(key);
+        throw error;
+      } finally {
+        loading.delete(key);
+      }
     })();
     loading.set(key, pending);
     return pending;
