@@ -549,7 +549,9 @@ function createUserApi({
     } catch (error) {
       const status = error.status || 500;
       if (status >= 500) log?.error("user api error", { error, stack: error && error.stack, path });
-      writeJson(res, status, { error: error.code || error.message || "error" }, corsHeaders);
+      // Internal errors (a TypeError, a SQLite message) stay in the log.
+      const message = status >= 500 ? "internal-error" : error.code || error.message || "error";
+      writeJson(res, status, { error: message }, corsHeaders);
     }
     return true;
   }

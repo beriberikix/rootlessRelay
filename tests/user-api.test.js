@@ -435,6 +435,29 @@ test("an operator's API token acts as a member; operator reach needs a sign-in",
   }
 });
 
+test("bodies must be JSON objects, and internal errors do not reach the client", async () => {
+  const failing = {
+    periodUsage: async () => 0,
+    monthly: async () => { throw new Error("SQLITE_BUSY: database is locked (internal detail)"); },
+  };
+  const { server, port, users, apiTokens } = await startServer({ usage: failing });
+  try {
+    const hal = await users.create({ username: "hal" });
+    const token = (await apiTokens.create({ userId: hal.id })).token;
+    const headers = { Authorization: `Bearer jwt:${token}`, "Content-Type": "application/json" };
+    for (const body of ["null", "[]", "5", "\"name\"", "{bad"]) {
+      const r = await request(port, { method: "POST", path: "/api/me/tokens", headers, body });
+      assert.equal(r.status, 400, body);
+      assert.equal(r.json().error, "invalid-json", body);
+    }
+    const usage = await request(port, { path: "/api/me/usage", headers });
+    assert.equal(usage.status, 500);
+    assert.deepEqual(usage.json(), { error: "internal-error" });
+  } finally {
+    await server.close();
+  }
+});
+
 test("account deletion needs a sign-in and the username typed back", async () => {
   const { server, port, users, apiTokens, activeSessions } = await startServer();
   try {
