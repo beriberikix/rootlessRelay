@@ -1,6 +1,7 @@
 "use strict";
 
 const { parseProxyRanges } = require("./server/client_ip");
+const { HOSTED_DENY_UDP_PORTS } = require("./policy/egress");
 
 // Hosted-mode configuration. RELAY_MODE picks a set of defaults; every
 // individual setting can still be overridden by its own environment variable.
@@ -14,6 +15,7 @@ const MODE_DEFAULTS = {
     anonEnabled: false,
     egressPolicy: "open",
     egressDenyPorts: [],
+    egressDenyUdpPorts: [],
     trustProxy: false,
     inboundRulesEnabled: true,
     auditEnabled: false,
@@ -26,6 +28,7 @@ const MODE_DEFAULTS = {
     anonEnabled: true,
     egressPolicy: "hosted",
     egressDenyPorts: [25],
+    egressDenyUdpPorts: HOSTED_DENY_UDP_PORTS,
     trustProxy: true,
     inboundRulesEnabled: false,
     auditEnabled: true,
@@ -171,6 +174,13 @@ function resolveConfig(env = process.env) {
       env.EGRESS_DENY_PORTS,
       defaults.egressDenyPorts,
       "EGRESS_DENY_PORTS",
+    ),
+    // UDP-only deny list; hosted mode starts from the reflector ports in
+    // policy/egress.js. An empty value turns it off.
+    egressDenyUdpPorts: parsePortList(
+      env.EGRESS_DENY_UDP_PORTS,
+      defaults.egressDenyUdpPorts,
+      "EGRESS_DENY_UDP_PORTS",
     ),
 
     antiSpoof: parseBool(env.ANTI_SPOOF, true),

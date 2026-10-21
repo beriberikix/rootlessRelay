@@ -4,6 +4,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   HOSTED_DENY_CIDRS,
+  HOSTED_DENY_UDP_PORTS,
   createEgressPolicy,
   inCidr,
   ipv4ToInt,
@@ -89,4 +90,15 @@ test("extra deny CIDRs extend the open policy and invalid addresses are rejected
     reason: "invalid-address",
   });
   assert.throws(() => createEgressPolicy({ mode: "strict" }), RangeError);
+});
+
+test("the UDP deny list blocks reflector ports for UDP only, before the allow list", () => {
+  const policy = hostedPolicy({ denyUdpPorts: HOSTED_DENY_UDP_PORTS, allowCidrs: ["198.51.100.0/24"] });
+  for (const port of [19, 389, 1900, 11211]) {
+    assert.deepEqual(policy.check("8.8.4.4", port, "udp"), { allow: false, reason: "denied-udp-port" }, `udp ${port}`);
+    assert.equal(policy.check("8.8.4.4", port, "tcp").allow, true, `tcp ${port}`);
+  }
+  assert.equal(policy.check("198.51.100.7", 1900, "udp").allow, false, "allow-listed range still refused");
+  for (const port of [53, 123, 443, 3478]) assert.equal(policy.check("8.8.4.4", port, "udp").allow, true, `udp ${port}`);
+  assert.equal(hostedPolicy().check("8.8.4.4", 1900, "udp").allow, true, "off when not configured");
 });

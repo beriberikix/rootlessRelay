@@ -355,6 +355,7 @@ pending account directly.
 | `SESSION_ALLOWED_ORIGINS` | Browser origins allowed to open sessions; `*` for any. Safe to open up because sessions authenticate with a token, not a cookie. | `ALLOWED_ORIGINS` | `ALLOWED_ORIGINS` |
 | `ALLOW_QUERY_TOKEN` | Accept `?token=` on the upgrade URL (leaks into logs). | `false` | `false` |
 | `EGRESS_POLICY`, `EGRESS_DENY_CIDRS`, `EGRESS_ALLOW_CIDRS`, `EGRESS_DENY_PORTS` | Outbound destination policy. Allow-listed CIDRs are exceptions to the deny list. | `open` | `hosted`, deny port 25 |
+| `EGRESS_DENY_UDP_PORTS` | UDP-only deny list, checked before the allow list. Hosted mode denies UDP reflector services (chargen, SNMP, CLDAP, SSDP, mDNS, memcached and others; see `policy/egress.js`); DNS and NTP stay open. Empty turns it off. | none | reflector ports |
 | `ANTI_SPOOF` | Lock each session to its first source IP and MAC. | `true` | `true` |
 | `TRUST_PROXY`, `TRUST_PROXY_HOPS`, `CLIENT_IP_HEADER` | Derive the client address from a trusted reverse proxy header. | `false` | `true`, `1`, `x-forwarded-for` |
 | `INBOUND_RULES_ENABLED` | Enable the reverse proxy and port-forward rules. | `true` | `false` |

@@ -63,6 +63,7 @@ function init(ctx) {
     denyCidrs: config.egressDenyCidrs,
     allowCidrs: config.egressAllowCidrs,
     denyPorts: config.egressDenyPorts,
+    denyUdpPorts: config.egressDenyUdpPorts,
   });
 
   const tiers = resolveTiers(config.tiersJson, {

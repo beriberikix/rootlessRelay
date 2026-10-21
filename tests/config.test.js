@@ -18,6 +18,7 @@ test("local mode defaults keep upstream behavior", () => {
   assert.equal(config.anonEnabled, false);
   assert.equal(config.egressPolicy, "open");
   assert.deepEqual(config.egressDenyPorts, []);
+  assert.deepEqual(config.egressDenyUdpPorts, []);
   assert.equal(config.inboundRulesEnabled, true);
   assert.equal(config.trustProxy, false);
   assert.equal(config.antiSpoof, true);
@@ -33,6 +34,8 @@ test("hosted mode flips the safety defaults", () => {
   assert.equal(config.anonEnabled, true);
   assert.equal(config.egressPolicy, "hosted");
   assert.deepEqual(config.egressDenyPorts, [25]);
+  assert.ok(config.egressDenyUdpPorts.includes(11211));
+  assert.ok(!config.egressDenyUdpPorts.includes(53) && !config.egressDenyUdpPorts.includes(123));
   assert.equal(config.inboundRulesEnabled, false);
   assert.equal(config.trustProxy, true);
   assert.equal(config.adminTrustProxy, true);
@@ -49,6 +52,7 @@ test("env overrides win over mode defaults", () => {
     AUTH_REQUIRED: "false",
     INBOUND_RULES_ENABLED: "true",
     EGRESS_DENY_PORTS: "25,465,587",
+    EGRESS_DENY_UDP_PORTS: "",
     EGRESS_ALLOW_CIDRS: "127.0.0.0/8, 10.1.0.0/16",
     ALLOWED_ORIGINS: "https://app.example.com,https://beta.example.com",
     TRUST_PROXY_HOPS: "2",
@@ -57,6 +61,7 @@ test("env overrides win over mode defaults", () => {
   assert.equal(config.authRequired, false);
   assert.equal(config.inboundRulesEnabled, true);
   assert.deepEqual(config.egressDenyPorts, [25, 465, 587]);
+  assert.deepEqual(config.egressDenyUdpPorts, [], "empty turns the UDP list off");
   assert.deepEqual(config.egressAllowCidrs, ["127.0.0.0/8", "10.1.0.0/16"]);
   assert.deepEqual(config.allowedOrigins, [
     "https://app.example.com",
