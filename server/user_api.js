@@ -7,8 +7,8 @@
 // refused. The operator panel remains the only place to see other accounts.
 //
 // Pending accounts (SIGNUP_MODE=invite, invite not yet redeemed) can read
-// their account, redeem an invite and delete themselves; everything that
-// leads to relay access is refused with 403 account-pending.
+// their account, redeem an invite and delete themselves; every other change
+// is refused with 403 account-pending.
 
 const { AuthError, extractCredential, extractOrg, readJsonBody, writeJson } = require("./public");
 const { ROLES, publicOrg, roleAllows } = require("../auth/orgs");
@@ -165,9 +165,11 @@ function createUserApi({
   const INVITES_PATH = /^\/api\/orgs\/([0-9]+)\/invites$/;
   const INVITE_PATH = /^\/api\/orgs\/([0-9]+)\/invites\/([0-9]+)$/;
 
-  // Who is acting, as the org store wants it. Operators pass every check.
+  // Who is acting, as the org store wants it. Operators pass every check,
+  // but only when signed in: an operator's API token is a credential for
+  // VMs and acts like any member's.
   function principal(identity) {
-    return { userId: identity.userId, operator: identity.kind === "operator" };
+    return { userId: identity.userId, operator: identity.kind === "operator" && identity.via === "jwt" };
   }
 
   // 404 for an org the caller has no role in, so ids cannot be probed.
@@ -215,6 +217,7 @@ function createUserApi({
     {
       method: "DELETE",
       match: (path) => path === PREFIX,
+      allowPending: true,
       async handle({ identity, req }) {
         // Deleting an account needs a sign-in, not just an API token, and the
         // username typed back as confirmation.
@@ -237,6 +240,7 @@ function createUserApi({
     {
       method: "POST",
       match: (path) => path === `${PREFIX}/redeem`,
+      allowPending: true,
       async handle({ identity, req }) {
         if (identity.status !== "pending") return [409, { error: "account is already active" }];
         const inviteStore = store(invites);
@@ -534,6 +538,7 @@ function createUserApi({
         return true;
       }
       const identity = await requireAccount(req, clientIP);
+      if (req.method !== "GET" && !route.allowPending) requireActive(identity);
       const [status, body] = await route.handle({ identity, req, path });
       if (status === 204) {
         res.writeHead(204, { "Cache-Control": "no-store", ...corsHeaders });
