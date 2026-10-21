@@ -173,11 +173,15 @@ function createUsageMeter({
         try {
           await db.transaction(async () => {
             for (const row of rows) {
+              // Bytes that arrive after their org was deleted (its sessions
+              // close after the rows go) are dropped, not written back as a
+              // row for an org that no longer exists. Org ids are never reused.
               await db.run(
-                "INSERT INTO org_usage_monthly (org_id, month, bytes_in, bytes_out, sessions) VALUES (?, ?, ?, ?, ?) " +
+                "INSERT INTO org_usage_monthly (org_id, month, bytes_in, bytes_out, sessions) " +
+                "SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM orgs WHERE id = ?) " +
                 "ON CONFLICT(org_id, month) DO UPDATE SET bytes_in = bytes_in + excluded.bytes_in, " +
                 "bytes_out = bytes_out + excluded.bytes_out, sessions = sessions + excluded.sessions",
-                [row.orgId, row.month, row.in, row.out, row.sessions],
+                [row.orgId, row.month, row.in, row.out, row.sessions, row.orgId],
               );
             }
           });
