@@ -11,6 +11,13 @@
   session's MAC. A second exchange returns the session's current address,
   and closing a session releases every address it held. relaynet audit
   2026-10-21, DP-1 and DP-2.
+- Account API: a pending account can read, redeem an invite code and delete
+  itself, and nothing else. Before, it could rename its personal org, invite
+  active users into it, and change or remove members. Changes are refused
+  with 403 `account-pending`. relaynet audit 2026-10-21, AU-1.
+- Account API: operator reach (any org's details, members and invitations)
+  needs a sign-in. An operator's API token now acts like any member's, so a
+  leaked VM token no longer reads every org. relaynet audit 2026-10-21, AU-2.
 
 ### Added (fork: organizations)
 

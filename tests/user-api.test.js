@@ -375,6 +375,66 @@ test("pending accounts can read, redeem an invite and nothing else", async () =>
   }
 });
 
+test("pending accounts cannot change orgs, members or invitations", async () => {
+  const { server, port, users, apiTokens } = await startServer();
+  try {
+    const gail = await users.create({ username: "gail", status: "pending" });
+    const token = (await apiTokens.create({ userId: gail.id })).token;
+    const headers = { Authorization: `Bearer jwt:${token}`, "Content-Type": "application/json" };
+    const call = (method, path, body) => request(port, { method, path, headers, body: body === undefined ? null : JSON.stringify(body) });
+
+    const personal = (await call("GET", "/api/me/orgs")).json().find((o) => o.personal);
+    assert.equal(personal.role, "owner");
+    const base = `/api/orgs/${personal.id}`;
+    assert.equal((await call("GET", `${base}/members`)).status, 200, "reads still work");
+
+    for (const [method, path, body] of [
+      ["PATCH", base, { name: "renamed" }],
+      ["POST", `${base}/invites`, { email: "someone@example.com", role: "admin" }],
+      ["PATCH", `${base}/members/${gail.id}`, { role: "admin" }],
+      ["DELETE", `${base}/members/${gail.id}`],
+      ["DELETE", `${base}/invites/1`],
+      ["DELETE", "/api/me/tokens/1"],
+    ]) {
+      const r = await call(method, path, body);
+      assert.equal(r.status, 403, `${method} ${path}`);
+      assert.equal(r.json().error, "account-pending", `${method} ${path}`);
+    }
+
+    // Leaving the beta is still possible.
+    assert.equal((await call("DELETE", "/api/me", { confirm: "gail" })).status, 204);
+  } finally {
+    await server.close();
+  }
+});
+
+test("an operator's API token acts as a member; operator reach needs a sign-in", async () => {
+  const { server, port, users, apiTokens } = await startServer();
+  try {
+    const ops = await users.create({ username: "ops2", role: "operator" });
+    const owner = await users.create({ username: "owner2" });
+    const opsToken = (await apiTokens.create({ userId: ops.id })).token;
+    const ownerToken = (await apiTokens.create({ userId: owner.id })).token;
+    const as = (bearer, method, path, body) => request(port, {
+      method, path,
+      headers: { Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" },
+      body: body === undefined ? null : JSON.stringify(body),
+    });
+
+    const created = await as(`jwt:${opsToken}`, "POST", "/api/orgs", { name: "acme", ownerUserId: owner.id });
+    assert.equal(created.status, 201);
+    const base = `/api/orgs/${created.json().id}`;
+    assert.equal((await as(`jwt:${ownerToken}`, "POST", `${base}/invites`, { email: "x@example.com", role: "member" })).status, 201);
+
+    for (const path of [base, `${base}/members`, `${base}/invites`]) {
+      assert.equal((await as(opsToken, "GET", path)).status, 404, `API token: ${path}`);
+      assert.equal((await as(`jwt:${opsToken}`, "GET", path)).status, 200, `signed in: ${path}`);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
 test("account deletion needs a sign-in and the username typed back", async () => {
   const { server, port, users, apiTokens, activeSessions } = await startServer();
   try {
