@@ -659,6 +659,44 @@ test("healthz and graceful shutdown: clients get 1001 and the process exits 0 wi
   await relay.close();
 });
 
+test("graceful shutdown records the open session: its usage counts and its connections end", NETWORK, async () => {
+  const relay = await startRelay({ hosted: true, env: { EGRESS_ALLOW_CIDRS: "127.0.0.0/8" } });
+  const sink = net.createServer((socket) => socket.on("data", () => {}));
+  const sinkPort = await listen(sink);
+  try {
+    const cookie = await relay.adminCookie();
+    const created = await httpJson(relay.adminPort, { method: "POST", path: "/api/users", cookie, body: { username: "erin", password: "erin-password" } });
+    const tokenRes = await httpJson(relay.adminPort, { method: "POST", path: `/api/users/${created.body.id}/tokens`, cookie, body: {} });
+    const { ws } = await openWebSocket(relay.wsPort, { token: tokenRes.body.token });
+    const frames = new FrameQueue(ws);
+    const vmMAC = macFromNumber(40);
+    const session = await bringUp(relay, ws, vmMAC, cookie);
+    ws.send(buildTCPFrame({ vmMAC, srcIP: session.vmIP, dstIP: "127.0.0.1", srcPort: 42000, dstPort: sinkPort, seq: 1, flags: { syn: true } }));
+    const synAck = await frames.waitFor((f) => f.kind === "tcp" && f.dstPort === 42000 && f.syn);
+    ws.send(buildTCPFrame({ vmMAC, srcIP: session.vmIP, dstIP: "127.0.0.1", srcPort: 42000, dstPort: sinkPort, seq: 2, ack: synAck.seq + 1, flags: { ack: true } }));
+    await delay(100);
+
+    // The client does not answer the close handshake before the exit.
+    ws.pause();
+    relay.child.kill("SIGTERM");
+    assert.equal((await relay.exited).code, 0);
+
+    const sqlite3 = require("sqlite3");
+    const database = new sqlite3.Database(relay.dbPath);
+    const get = (sql) => new Promise((resolve, reject) => database.get(sql, (error, row) => (error ? reject(error) : resolve(row))));
+    try {
+      assert.equal((await get("SELECT sessions FROM org_usage_monthly WHERE org_id = " + created.body.defaultOrgId)).sessions, 1);
+      const conn = await get(`SELECT ended_at FROM connections_audit WHERE dst_port = ${sinkPort}`);
+      assert.ok(conn && conn.ended_at, "the connection open at shutdown has an end time");
+    } finally {
+      database.close();
+    }
+  } finally {
+    sink.close();
+    await relay.close();
+  }
+});
+
 // The address a DHCP offer carries (yiaddr).
 function offeredIP(offer) {
   return Array.from(offer.payload.subarray(16, 20)).join(".");

@@ -19,6 +19,18 @@
   needs a sign-in. An operator's API token now acts like any member's, so a
   leaked VM token no longer reads every org. relaynet audit 2026-10-21, AU-2.
 
+### Fixed
+
+- Shutdown finishes every session (usage, audit, addresses) before the final
+  flush. Before, the flush and exit ran before any session's close handler,
+  so each deploy dropped the session count of open sessions and left their
+  connections without an end time in the audit log, where they matched every
+  later abuse lookup for that destination. relaynet audit 2026-10-21, MT-1.
+- A failed read of an org's monthly usage is retried. Before, one transient
+  database error (for example `SQLITE_BUSY`) made every later session open
+  and `/api/me` for that org fail until restart. relaynet audit 2026-10-21,
+  MT-2.
+
 ### Added (fork: organizations)
 
 - Organizations own the private network, API tokens, tier and usage; users

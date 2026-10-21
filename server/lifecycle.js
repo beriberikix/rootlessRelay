@@ -2,8 +2,8 @@
 
 // Graceful shutdown and crash handling. Hosting platforms send SIGTERM and
 // kill shortly after (the test harnesses wait 1 s), so the whole sequence is
-// bounded: stop accepting, tell every client to reconnect, flush metering,
-// exit. A hard-exit timer guarantees the process never hangs.
+// bounded: stop accepting, tell every client to reconnect and finish its
+// session, flush metering, exit. A hard-exit timer guarantees the process never hangs.
 
 function installLifecycle({
   proc = process,
@@ -27,11 +27,14 @@ function installLifecycle({
     }
   }
 
+  // Tells each client to reconnect and finishes the session's bookkeeping
+  // (usage, audit, addresses) now, so the flush that follows includes it.
   function closeSessions(code, reason) {
-    for (const session of getSessions()) {
+    for (const session of [...getSessions()]) {
       const ws = session.ws || session;
       try {
         if (typeof ws.close === "function") ws.close(code, reason);
+        if (typeof session.finish === "function") session.finish(code, reason);
       } catch (error) {
         log?.warn("session close failed", { error });
       }
