@@ -1,0 +1,30 @@
+name: release version
+
+# A release's tag must match package.json at the tagged commit (v + version),
+# so deployers that pin the tarball see the version they asked for. Bump
+# "version" in the PR that goes into a release.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Tag matches package.json
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::release $TAG but package.json says $version; bump \"version\" before tagging"
+            exit 1
+          fi
+          echo "$TAG matches package.json"

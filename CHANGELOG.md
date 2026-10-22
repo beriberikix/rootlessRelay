@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+
+- `package.json` version is `0.7.0-hosted.10` (v0.7.0-hosted.10 shipped
+  saying `hosted.9`). A workflow now fails any release whose tag does not
+  match `package.json` at the tagged commit. relaynet audit 2026-10-21, CI-9.
+
 ### Added
 
 - `ADMIN_PUBLIC_HOST`: serve the admin app on the public port for one
