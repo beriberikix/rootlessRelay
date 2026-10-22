@@ -1,6 +1,8 @@
 # Node 24 is the current LTS line. Bump deliberately; the sqlite3 native
 # module ships prebuilt binaries per Node ABI and is rebuilt by `npm ci`.
-FROM node:24-bookworm-slim
+# Debian 13 (trixie): the sqlite3 6.x prebuilt binary needs glibc 2.38 or
+# newer, and bookworm has 2.36.
+FROM node:24-trixie-slim
 
 ENV NODE_ENV=production
 WORKDIR /app

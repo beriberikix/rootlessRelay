@@ -28,6 +28,11 @@
   value) is a 400 `invalid-json`, and every 500 answers `internal-error`
   with the detail kept in the log; before, handlers' TypeErrors and SQLite
   messages reached the client. relaynet audit 2026-10-21, AU-4.
+- `sqlite3` 5 → 6. 5.x pulled in an old build chain (`node-gyp` 8 with
+  `tar` 6 and `@tootallnate/once` 1: 13 Dependabot alerts, none reachable at
+  runtime); 6.x drops it and `npm audit` is clean. The 6.x binary needs glibc 2.38, so the Docker image moves from
+  `node:24-bookworm-slim` to `node:24-trixie-slim` (Debian 13); on bookworm
+  it fails to load. relaynet audit 2026-10-21, CI-4.
 
 ### Fixed
 
