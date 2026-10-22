@@ -233,7 +233,7 @@ Tokens come from one of three places:
   expiry.
 - **Anonymous demo tokens**: `POST /api/anon/token` on the public port returns
   a short-lived token bound to the caller's address, limited to
-  `ANON_TOKENS_PER_IP_PER_HOUR`. If `TURNSTILE_SECRET` is set, the request
+  `ANON_TOKENS_PER_IP_PER_HOUR` (per /64 for IPv6). If `TURNSTILE_SECRET` is set, the request
   body must carry a valid Cloudflare Turnstile `turnstileToken`.
 - **External OIDC JWTs**: set `JWT_ISSUER`, `JWT_AUDIENCE` and `JWT_JWKS_URL`.
   Tokens are verified against the provider's JWKS and an account is created on

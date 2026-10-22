@@ -33,6 +33,22 @@
   runtime); 6.x drops it and `npm audit` is clean. The 6.x binary needs glibc 2.38, so the Docker image moves from
   `node:24-bookworm-slim` to `node:24-trixie-slim` (Debian 13); on bookworm
   it fails to load. relaynet audit 2026-10-21, CI-4.
+- Admin password sign-in takes the same time whether or not the username is
+  an active operator (a hash comparison always runs); before, the response
+  time told which usernames were operators. relaynet audit 2026-10-21, AD-1.
+- `POST /api/users` refuses an unknown tier with 400, as the tier routes do;
+  before, any string was stored and silently treated as `user`. relaynet
+  audit 2026-10-21, AD-3.
+- Anonymous-token rate limiting keys IPv6 clients by /64, and addresses that
+  never return are swept after an hour; before, every source address stayed
+  in memory until restart. relaynet audit 2026-10-21, AU-3.
+- Log fields are capped at 256 characters, so an unauthenticated client
+  cannot write long strings (an `Origin` header, an unverified token's
+  issuer) into the shipped logs. relaynet audit 2026-10-21, MT-6.
+- The Docker image and CI install with `--ignore-scripts` and then rebuild
+  only `sqlite3`, so no other dependency's install script runs. The
+  `allowScripts` key is gone: npm never read it. relaynet audit 2026-10-21,
+  CI-5.
 
 ### Fixed
 

@@ -1,5 +1,6 @@
 # Node 24 is the current LTS line. Bump deliberately; the sqlite3 native
-# module ships prebuilt binaries per Node ABI and is rebuilt by `npm ci`.
+# module ships prebuilt binaries per Node-API version, fetched by its install
+# script.
 # Debian 13 (trixie): the sqlite3 6.x prebuilt binary needs glibc 2.38 or
 # newer, and bookworm has 2.36.
 FROM node:24-trixie-slim
@@ -8,8 +9,11 @@ ENV NODE_ENV=production
 WORKDIR /app
 
 # Install production dependencies first so this layer caches across code changes.
+# No dependency's install script runs except sqlite3's, which fetches its
+# native binary.
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --no-audit --no-fund
+RUN npm ci --omit=dev --no-audit --no-fund --ignore-scripts \
+ && npm rebuild sqlite3
 
 # Runtime files only; tests, benchmarks, secrets and local state are excluded
 # by .dockerignore.

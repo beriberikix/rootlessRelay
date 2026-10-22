@@ -3,6 +3,7 @@
 // User accounts: operators (admin UI) and end users (data plane), either
 // with a local password or linked to an external identity provider.
 
+const crypto = require("node:crypto");
 const bcrypt = require("bcryptjs");
 const { ensurePersonalOrg, removeUserAndOrgs } = require("./orgs");
 
@@ -31,6 +32,7 @@ function publicUser(row) {
 }
 
 function createUserStore(db, { bcryptRounds = 12, now = Date.now } = {}) {
+  let dummyHash = null;
   async function findRowByUsername(username) {
     return db.get("SELECT * FROM users WHERE username = ?", [username]);
   }
@@ -142,8 +144,16 @@ function createUserStore(db, { bcryptRounds = 12, now = Date.now } = {}) {
       await db.run("UPDATE users SET last_login_at = ? WHERE id = ?", [nowIso(now), id]);
     },
 
+    // With no user or no password set, still runs one comparison (against a
+    // hash nobody knows) so the time taken does not tell whether the account
+    // exists.
     async verifyPassword(user, password) {
-      if (!user || !user.password_hash || typeof password !== "string") return false;
+      if (typeof password !== "string") return false;
+      if (!user || !user.password_hash) {
+        dummyHash ??= bcrypt.hash(crypto.randomBytes(16).toString("hex"), bcryptRounds);
+        await bcrypt.compare(password, await dummyHash);
+        return false;
+      }
       return bcrypt.compare(password, user.password_hash);
     },
 

@@ -37,8 +37,11 @@ function configurePassport({ users }) {
     new LocalStrategy(async (username, password, done) => {
       try {
         const user = await users.findByUsername(username);
-        if (!user || user.role !== "operator" || user.status !== "active" ||
-          !(await users.verifyPassword(user, password))) {
+        const eligible = Boolean(user && user.role === "operator" && user.status === "active");
+        // Always compare, so the response time does not tell which
+        // usernames are operators.
+        const valid = await users.verifyPassword(eligible ? user : null, password);
+        if (!eligible || !valid) {
           done(null, false, { message: "Invalid username or password" });
           return;
         }
@@ -368,6 +371,10 @@ function createAdminApp({
 
   app.post("/api/users", asyncRoute(async (req, res) => {
     const { username, password, role, tier } = req.body || {};
+    if (tier !== undefined && tier !== null && tier !== "" && unknownTier(tier)) {
+      res.status(400).json({ error: unknownTier(tier) });
+      return;
+    }
     try {
       const user = await users.create({
         username,

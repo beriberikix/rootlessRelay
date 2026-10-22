@@ -132,12 +132,30 @@ function createApiTokenStore(db, { now = Date.now, randomBytes = crypto.randomBy
   };
 }
 
+const HOUR_MS = 60 * 60 * 1000;
+
 function ipHash(ip, secret) {
   return crypto.createHmac("sha256", secret).update(String(ip)).digest("hex").slice(0, 16);
 }
 
+// The rate-limit key for an address: IPv4 as is, IPv6 by its /64 (one
+// subscriber usually holds a whole /64, so per-address keys are free to
+// rotate).
+function rateKey(ip) {
+  const address = String(ip).split("%")[0];
+  if (!address.includes(":")) return address;
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
+  if (mapped) return mapped[1];
+  const [head, tail] = address.split("::");
+  const front = head ? head.split(":") : [];
+  const back = tail ? tail.split(":") : [];
+  const groups = tail === undefined ? front : [...front, ...Array(Math.max(0, 8 - front.length - back.length)).fill("0"), ...back];
+  return `${groups.slice(0, 4).map((g) => parseInt(g || "0", 16).toString(16)).join(":")}::/64`;
+}
+
 // Anonymous demo tokens: HS256 JWTs bound (optionally) to the requesting IP
-// and rate-limited per IP so a single client cannot mint unbounded identities.
+// and rate-limited per IP (per /64 for IPv6) so a single client cannot mint
+// unbounded identities.
 function createAnonIssuer({
   secret,
   ttlMs = 15 * 60 * 1000,
@@ -148,24 +166,36 @@ function createAnonIssuer({
 }) {
   if (!secret) throw new RangeError("anon token secret is required");
   const key = new TextEncoder().encode(secret);
-  const issued = new Map(); // ip -> timestamps
+  const issued = new Map(); // rate key -> timestamps
+  let lastSweepAt = 0;
 
-  function prune(ip, current) {
-    const list = (issued.get(ip) || []).filter((ts) => current - ts < 60 * 60 * 1000);
-    if (list.length === 0) issued.delete(ip);
-    else issued.set(ip, list);
+  function prune(rk, current) {
+    const list = (issued.get(rk) || []).filter((ts) => current - ts < HOUR_MS);
+    if (list.length === 0) issued.delete(rk);
+    else issued.set(rk, list);
     return list;
+  }
+
+  // Addresses that never come back would otherwise stay in the map forever.
+  function sweep(current) {
+    if (current - lastSweepAt < 60 * 1000) return;
+    lastSweepAt = current;
+    for (const [rk, list] of issued) {
+      if (current - list.at(-1) >= HOUR_MS) issued.delete(rk);
+    }
   }
 
   return {
     async issue({ ip }) {
       const current = now();
-      const recent = prune(ip, current);
+      sweep(current);
+      const rk = rateKey(ip);
+      const recent = prune(rk, current);
       if (recent.length >= perIpPerHour) {
         throw new AuthError(429, "anon-token-rate-limited");
       }
       recent.push(current);
-      issued.set(ip, recent);
+      issued.set(rk, recent);
       const jti = randomUUID();
       const expiresAt = current + ttlMs;
       const claims = bindIp ? { iph: ipHash(ip, secret) } : {};
@@ -177,6 +207,11 @@ function createAnonIssuer({
         .setExpirationTime(Math.floor(expiresAt / 1000))
         .sign(key);
       return { token, expiresAt: new Date(expiresAt).toISOString(), ttlMs };
+    },
+
+    // How many rate keys are held.
+    trackedKeys() {
+      return issued.size;
     },
 
     async verify(token, { ip }) {
@@ -347,6 +382,7 @@ module.exports = {
   ANON_ISSUER,
   API_TOKEN_PREFIX,
   createAnonIssuer,
+  rateKey,
   createApiTokenStore,
   createAuthenticator,
   createJwtVerifier,
