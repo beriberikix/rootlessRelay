@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Security
+
+- With `JWT_VERIFIED_CLAIM` set, a first sign-in whose address the IdP has
+  not verified gets `403 email-not-verified` and creates no account; before,
+  it created a pending account named `<iss>|<sub>` that never took a real
+  name. Existing accounts keep working, and one still on that placeholder
+  name takes its address at the first verified sign-in. relaynet audit
+  2026-10-21, AU-5.
+
 ### Changed
 
 - `package.json` version is `0.7.0-hosted.10` (v0.7.0-hosted.10 shipped

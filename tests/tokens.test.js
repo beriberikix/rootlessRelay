@@ -331,3 +331,36 @@ test("anonymous issuer: addresses that never return are swept; IPv6 is limited p
   assert.equal(rateKey("fe80::1%eth0"), "fe80:0:0:0::/64");
   assert.equal(rateKey("::1"), "0:0:0:0::/64");
 });
+
+test("with a verified claim configured, a sign-in without a verified address creates no account", async () => {
+  const { users, orgs, apiTokens, clock } = await setup();
+  const { privateKey, publicKey } = await jose.generateKeyPair("RS256");
+  const jwk = await jose.exportJWK(publicKey);
+  const verifier = (verifiedClaim) => createJwtVerifier({
+    issuer: "https://idp.example", audience: "relay", jwksUrl: "https://idp.example/jwks",
+    jwks: jose.createLocalJWKSet({ keys: [jwk] }), usernameClaim: "email", verifiedClaim, now: () => clock.now,
+  });
+  const sign = (sub, claims) => new jose.SignJWT(claims)
+    .setProtectedHeader({ alg: "RS256" }).setIssuer("https://idp.example").setAudience("relay")
+    .setSubject(sub).setIssuedAt(Math.floor(clock.now / 1000)).setExpirationTime(Math.floor(clock.now / 1000) + 300)
+    .sign(privateKey);
+  const config = { authRequired: true, anonEnabled: false, signupMode: "invite", jwt: { defaultTier: "user" } };
+  const checked = createAuthenticator({ config, users, apiTokens, orgs, jwt: verifier("email_verified") });
+  const refused = (error) => error.status === 403 && error.code === "email-not-verified";
+
+  await assert.rejects(checked(await sign("sub-eve", { email: "eve@example.com", email_verified: false }), { allowPending: true }), refused);
+  await assert.rejects(checked(await sign("sub-eve", {}), { allowPending: true }), refused, "no address at all");
+  assert.equal(await users.findByExternalSub("https://idp.example|sub-eve"), undefined, "no row was created");
+
+  // Once verified, the account is created (pending, as invite sign-up does).
+  const eve = await checked(await sign("sub-eve", { email: "eve@example.com", email_verified: true }), { allowPending: true });
+  assert.equal(eve.username, "eve@example.com");
+  assert.equal(eve.status, "pending");
+  // ... and an existing account is not locked out by a later unverified sign-in.
+  assert.equal((await checked(await sign("sub-eve", { email_verified: false }), { allowPending: true })).userId, eve.userId);
+
+  // Without a verified claim nothing can be told apart: accounts are created as before.
+  const unchecked = createAuthenticator({ config, users, apiTokens, orgs, jwt: verifier(null) });
+  const fay = await unchecked(await sign("sub-fay", {}), { allowPending: true });
+  assert.equal(fay.username, "https://idp.example|sub-fay");
+});

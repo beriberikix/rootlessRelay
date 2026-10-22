@@ -84,13 +84,22 @@ function createUserStore(db, { bcryptRounds = 12, now = Date.now } = {}) {
     // External identity providers create users on first sight.
     async upsertExternal({ externalSub, username, tier = "user", status = "active" }) {
       const existing = await this.findByExternalSub(externalSub);
+      const placeholder = externalSub.slice(0, 120);
       if (existing) {
         // Accounts created before orgs existed (or by a rolled-back release)
         // get their personal org on first sight.
         if (!existing.default_org_id) await ensurePersonalOrg(db, existing.id, { now });
+        // An account first seen without a usable address is named after its
+        // subject; it takes the address once one arrives, if that is free.
+        if (username && USERNAME_RE.test(username) && existing.username === placeholder &&
+          !(await findRowByUsername(username))) {
+          await db.run("UPDATE users SET username = ? WHERE id = ? AND username = ?", [username, existing.id, placeholder])
+            .catch((error) => { if (!/UNIQUE/.test(error.message)) throw error; });
+          return this.findById(existing.id);
+        }
         return existing.default_org_id ? existing : this.findById(existing.id);
       }
-      let candidate = username && USERNAME_RE.test(username) ? username : externalSub.slice(0, 120);
+      let candidate = username && USERNAME_RE.test(username) ? username : placeholder;
       if (await findRowByUsername(candidate)) {
         candidate = `${candidate.slice(0, 100)}#${externalSub.slice(-8)}`;
       }

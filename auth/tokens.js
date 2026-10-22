@@ -248,6 +248,9 @@ function createJwtVerifier({
   const keySet = jwks || jose.createRemoteJWKSet(new URL(jwksUrl));
   return {
     issuer,
+    // Whether the IdP says which addresses it has verified; only then can a
+    // sign-in be told apart from one with an unverified address.
+    checksEmail: verifiedClaim !== null,
     async verify(token) {
       let payload;
       try {
@@ -359,8 +362,15 @@ function createAuthenticator({ config, users, apiTokens, orgs, anon = null, jwt 
 
     if (jwt && unverified.iss === jwt.issuer) {
       const verified = await jwt.verify(token);
+      const externalSub = `${verified.iss}|${verified.sub}`;
+      // No account for a sign-in whose address the IdP has not verified (an
+      // email/password sign-up that skipped verification): it would only be a
+      // nameless pending row. Existing accounts keep working.
+      if (jwt.checksEmail && !verified.emailVerified && !(await users.findByExternalSub(externalSub))) {
+        throw new AuthError(403, "email-not-verified");
+      }
       const user = await users.upsertExternal({
-        externalSub: `${verified.iss}|${verified.sub}`,
+        externalSub,
         username: verified.username,
         tier: config.jwt ? config.jwt.defaultTier : "user",
         status: config.signupMode === "invite" ? "pending" : "active",

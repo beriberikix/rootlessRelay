@@ -146,3 +146,20 @@ test("verifyPassword compares against a dummy hash when there is no password to 
   assert.equal(compare.mock.callCount(), 2);
   await db.close();
 });
+
+test("an account named after its subject takes its address when one arrives, if it is free", async () => {
+  const db = openDatabase(":memory:");
+  await db.migrate();
+  const users = createUserStore(db, { bcryptRounds: 4 });
+  const placeholder = await users.upsertExternal({ externalSub: "https://idp|sub-1" });
+  assert.equal(placeholder.username, "https://idp|sub-1");
+  const named = await users.upsertExternal({ externalSub: "https://idp|sub-1", username: "gil@example.com" });
+  assert.equal(named.id, placeholder.id);
+  assert.equal(named.username, "gil@example.com");
+  // A real name is never replaced.
+  assert.equal((await users.upsertExternal({ externalSub: "https://idp|sub-1", username: "other@example.com" })).username, "gil@example.com");
+  // A taken address leaves the placeholder.
+  await users.upsertExternal({ externalSub: "https://idp|sub-2" });
+  assert.equal((await users.upsertExternal({ externalSub: "https://idp|sub-2", username: "gil@example.com" })).username, "https://idp|sub-2");
+  await db.close();
+});
