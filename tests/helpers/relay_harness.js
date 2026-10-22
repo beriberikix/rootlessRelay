@@ -213,7 +213,9 @@ async function waitForWebSocket(port, child, options = {}) {
 
 function httpJson(port, { method = "GET", path: pathname = "/", body = null, cookie = null, headers = {} } = {}) {
   const payload = body === null ? null : JSON.stringify(body);
-  const requestHeaders = { ...headers };
+  // As the admin panel sends it (the admin app refuses writes without it);
+  // harmless on the public port.
+  const requestHeaders = { "X-Requested-With": "relaynet-admin", ...headers };
   if (payload !== null) {
     requestHeaders["Content-Type"] = "application/json";
     requestHeaders["Content-Length"] = Buffer.byteLength(payload);

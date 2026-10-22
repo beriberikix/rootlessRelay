@@ -666,8 +666,11 @@
       }
     }
 
+    // Every request carries this header; the server refuses writes without it.
+    const ADMIN_HEADERS = { 'X-Requested-With': 'relaynet-admin' };
+
     async function apiFetch(url, options = {}) {
-      const response = await fetch(url, options);
+      const response = await fetch(url, { ...options, headers: { ...ADMIN_HEADERS, ...(options.headers || {}) } });
       if (response.status === 401) {
         setAuthenticatedState(false);
         throw new Error('Unauthorized');
@@ -698,7 +701,7 @@
       try {
         const response = await fetch('/api/login', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { ...ADMIN_HEADERS, 'Content-Type': 'application/json' },
           body: JSON.stringify({ username, password }),
         });
         if (!response.ok) {
@@ -714,7 +717,7 @@
     });
 
     $('#logout-button').addEventListener('click', async () => {
-      try { await fetch('/api/logout', { method: 'POST' }); } finally { setAuthenticatedState(false); }
+      try { await fetch('/api/logout', { method: 'POST', headers: ADMIN_HEADERS }); } finally { setAuthenticatedState(false); }
     });
 
     // ---------- sections ------------------------------------------------------

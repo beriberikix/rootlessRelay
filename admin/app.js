@@ -4,7 +4,10 @@
 // Passport; sessions persist in SQLite. End users, API tokens, inbound rules,
 // live sessions and configuration are managed here.
 
+const crypto = require("crypto");
+const fs = require("fs");
 const http = require("http");
+const net = require("net");
 const path = require("path");
 const express = require("express");
 const passport = require("passport");
@@ -100,6 +103,41 @@ function createLoginRateLimiter({ windowMs, maxAttempts, now = Date.now }) {
   };
 }
 
+// The panel's Content-Security-Policy: its inline script by hash, nothing
+// from other origins, never framed.
+function panelCsp(adminHtmlPath) {
+  let html = "";
+  try {
+    html = fs.readFileSync(adminHtmlPath, "utf8");
+  } catch (_error) {
+    html = "";
+  }
+  const hashes = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]
+    .map((m) => `'sha256-${crypto.createHash("sha256").update(m[1]).digest("base64")}'`);
+  return [
+    "default-src 'none'",
+    `script-src ${hashes.join(" ") || "'none'"}`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "connect-src 'self'",
+    "form-action 'self'",
+    "base-uri 'none'",
+    "frame-ancestors 'none'",
+  ].join("; ");
+}
+
+// DNS rebinding: a page on an attacker's name that resolves to 127.0.0.1
+// (or the private network) must not reach the panel. Accept loopback names,
+// IP literals, ADMIN_PUBLIC_HOST and ADMIN_ALLOWED_HOSTS.
+function hostAllowed(req, config) {
+  const host = String(req.headers.host || "").toLowerCase().replace(/:\d+$/, "");
+  if (!host) return false;
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  if (net.isIP(host.replace(/^\[|\]$/g, ""))) return true;
+  if (config.adminPublicHost && host === config.adminPublicHost) return true;
+  return Boolean(config.adminAllowedHosts && config.adminAllowedHosts.includes(host));
+}
+
 function requireAdminAuth(req, res, next) {
   if (req.isAuthenticated && req.isAuthenticated()) {
     next();
@@ -165,6 +203,26 @@ function createAdminApp({
   log,
 }) {
   const app = express();
+  app.disable("x-powered-by");
+  const csp = panelCsp(adminHtmlPath);
+
+  app.use((req, res, next) => {
+    // The metrics scraper on a private network may address the machine by
+    // any name; /metrics has its own access rule below.
+    if (!(req.path === "/metrics" && !req.adminPublic) && !hostAllowed(req, config)) {
+      res.status(421).json({ error: "unknown host" });
+      return;
+    }
+    res.set({
+      "Content-Security-Policy": csp,
+      "X-Frame-Options": "DENY",
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "no-referrer",
+      "Cross-Origin-Opener-Policy": "same-origin",
+    });
+    if (config.adminCookieSecure) res.set("Strict-Transport-Security", "max-age=31536000");
+    next();
+  });
 
   const loginLimiter = createLoginRateLimiter({
     windowMs: config.adminLoginWindowMs,
@@ -174,13 +232,23 @@ function createAdminApp({
   if (config.adminTrustProxy) app.set("trust proxy", 1);
 
   // CSRF: the panel only sends JSON via fetch, so form-encoded bodies are not
-  // parsed, and a state-changing request that carries an Origin must come
-  // from this host. (Behind `fly proxy` the operator uses localhost, where a
+  // parsed; every state-changing request carries X-Requested-With, and one
+  // that carries an Origin must come from this host. (Behind `fly proxy` the operator uses localhost, where a
   // page on another local port is "same-site" and SameSite cookies alone do
   // not stop it.) Requests without Origin (CLI, tests) are not browsers.
   app.use(express.json({ limit: "64kb" }));
   app.use((req, res, next) => {
-    if (["GET", "HEAD", "OPTIONS"].includes(req.method) || !req.headers.origin) {
+    if (["GET", "HEAD", "OPTIONS"].includes(req.method)) {
+      next();
+      return;
+    }
+    // A custom header: no form or cross-site request can set it without a
+    // CORS preflight, which this app never grants.
+    if (req.headers["x-requested-with"] !== "relaynet-admin") {
+      res.status(403).json({ error: "missing X-Requested-With: relaynet-admin" });
+      return;
+    }
+    if (!req.headers.origin) {
       next();
       return;
     }
@@ -219,7 +287,8 @@ function createAdminApp({
 
   // Prometheus scrape endpoint: operator session or METRICS_TOKEN bearer.
   // METRICS_PUBLIC=true skips auth for scrapers on a private network (e.g. a
-  // platform scraper reaching the admin port over its internal network).
+  // platform scraper reaching the admin port over its internal network),
+  // never for requests that came in on the public port.
   app.get("/metrics", asyncRoute(async (req, res) => {
     if (!metrics || !metrics.enabled) {
       res.status(404).json({ error: "metrics are disabled" });
@@ -230,7 +299,7 @@ function createAdminApp({
     const tokenOk = config.metricsToken && bearer && bearer.length === config.metricsToken.length &&
       require("crypto").timingSafeEqual(Buffer.from(bearer), Buffer.from(config.metricsToken));
     const sessionOk = req.isAuthenticated && req.isAuthenticated();
-    if (!config.metricsPublic && !tokenOk && !sessionOk) {
+    if (!(config.metricsPublic && !req.adminPublic) && !tokenOk && !sessionOk) {
       res.status(401).json({ error: "Unauthorized" });
       return;
     }

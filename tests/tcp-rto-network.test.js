@@ -261,6 +261,7 @@ function adminLogin(port) {
         headers: {
           "Content-Type": "application/json",
           "Content-Length": Buffer.byteLength(body),
+          "X-Requested-With": "relaynet-admin",
         },
       }, (response) => {
         response.resume();
@@ -288,6 +289,7 @@ function postJSON(port, pathname, value) {
   const headers = {
     "Content-Type": "application/json",
     "Content-Length": Buffer.byteLength(body),
+    "X-Requested-With": "relaynet-admin",
   };
   const cookie = adminCookies.get(port);
   if (cookie) headers.Cookie = cookie;

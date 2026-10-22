@@ -149,6 +149,11 @@ function readJsonBody(req, { limit = 16 * 1024 } = {}) {
   });
 }
 
+// The request's hostname, lower case, without the port.
+function requestHost(req) {
+  return String(req.headers.host || "").toLowerCase().replace(/:\d+$/, "");
+}
+
 const LOCAL_IDENTITY = Object.freeze({ kind: "local", owner: "local", tier: "local" });
 
 function createPublicServer({
@@ -188,9 +193,17 @@ function createPublicServer({
   async function requestHandler(req, res) {
     const path = req.url.split("?")[0];
 
+    // The admin app on the public port: by hostname, or under a path prefix.
+    // `adminPublic` tells it the request came from the internet.
+    if (adminApp && config.adminPublicHost && requestHost(req) === config.adminPublicHost) {
+      req.adminPublic = true;
+      adminApp(req, res);
+      return;
+    }
     if (adminApp && config.adminPublicPath &&
       (path === config.adminPublicPath || path.startsWith(`${config.adminPublicPath}/`))) {
       req.url = req.url.slice(config.adminPublicPath.length) || "/";
+      req.adminPublic = true;
       adminApp(req, res);
       return;
     }
@@ -275,6 +288,10 @@ function createPublicServer({
     try {
       if (lifecycle && lifecycle.isShuttingDown()) {
         rejectUpgrade(socket, 503, "server shutting down");
+        return;
+      }
+      if (config.adminPublicHost && requestHost(req) === config.adminPublicHost) {
+        rejectUpgrade(socket, 404, "not found");
         return;
       }
       const clientIP = resolveClientIP(req, config.clientIpOptions);

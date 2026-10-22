@@ -136,6 +136,7 @@ function init(ctx) {
     authenticate: null,
     handleAnonToken: null,
     publicServer: null,
+    adminApp: null,
     adminServer: null,
   };
   let resolveReady;
@@ -188,6 +189,16 @@ function init(ctx) {
       handleAnonToken: config.anonEnabled ? handleAnonToken : null,
       metrics,
       userApi,
+      adminApp: config.adminPublicHost || config.adminPublicPath
+        ? (req, res) => {
+          if (state.adminApp) {
+            state.adminApp(req, res);
+            return;
+          }
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "starting" }));
+        }
+        : null,
     });
     state.publicServer = publicServer;
     lifecycle.addServer(publicServer.server);
@@ -333,6 +344,7 @@ function init(ctx) {
         log,
       });
       state.adminServer = server;
+      state.adminApp = app;
       lifecycle.addServer(server);
       console.log(`💡 Admin UI listening on http://${ctx.ADMIN_BIND_ADDRESS}:${ctx.ADMIN_PORT}`);
     };

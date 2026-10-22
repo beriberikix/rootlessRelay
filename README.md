@@ -371,6 +371,8 @@ pending account directly.
 | `ADMIN_AUTH_DB_PATH` | SQLite database (accounts, tokens, usage, audit, admin sessions). | `./admin_auth.sqlite` | `/data/admin_auth.sqlite` in Docker |
 | `ADMIN_SESSION_SECRET`, `ADMIN_BOOTSTRAP_USERNAME`, `ADMIN_BOOTSTRAP_PASSWORD`, `ADMIN_TRUST_PROXY`, `ADMIN_COOKIE_SECURE` | Operator login. The bootstrap pair creates the first operator when none exists. | | secret required |
 | `ADMIN_PUBLIC_PATH` | Also mount the admin app on the public port under this prefix (single-port platforms; requires `ADMIN_COOKIE_SECURE=true`). | unset | unset |
+| `ADMIN_PUBLIC_HOST` | Also serve the admin app on the public port, at its root, to requests for this hostname (e.g. `admin.example.com`); relay sessions are refused there. Requires `ADMIN_COOKIE_SECURE=true` and, behind a TLS proxy, `ADMIN_TRUST_PROXY=true`. `METRICS_PUBLIC` never applies on the public port. Use SSO with MFA. | unset | unset |
+| `ADMIN_ALLOWED_HOSTS` | Other hostnames the admin app answers to. Loopback names, IP literals and `ADMIN_PUBLIC_HOST` always work; anything else gets 421 (DNS rebinding). | unset | unset |
 
 Set `LOG_LEVEL=0` in hosted deployments; the data plane logs every packet at
 the default level.

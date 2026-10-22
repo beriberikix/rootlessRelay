@@ -2,7 +2,26 @@
 
 ## Unreleased
 
+### Added
+
+- `ADMIN_PUBLIC_HOST`: serve the admin app on the public port for one
+  hostname (for example `admin.example.com`), so operators need no tunnel.
+  Relay sessions are refused on that name, and `METRICS_PUBLIC` does not
+  apply there. `ADMIN_PUBLIC_PATH` now works too: the public server was never
+  given the admin app (relaynet audit 2026-10-21, AD-8).
+
 ### Security
+
+- Admin app: every write must carry `X-Requested-With: relaynet-admin` (the
+  panel sends it; no form or cross-site request can without a preflight), on
+  top of the Origin check; requests for a hostname other than loopback names,
+  IP literals, `ADMIN_PUBLIC_HOST` or `ADMIN_ALLOWED_HOSTS` get 421, against
+  DNS rebinding. relaynet audit 2026-10-21, AD-2.
+- Admin app: Content-Security-Policy (the panel's one inline script pinned by
+  hash, nothing from other origins, `frame-ancestors 'none'`),
+  `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: no-referrer`, HSTS
+  with secure cookies; `X-Powered-By` is gone. relaynet audit 2026-10-21,
+  AD-7.
 
 - Hosted mode denies UDP to reflector services (QOTD, chargen, portmapper,
   NetBIOS, SNMP, CLDAP, RIP, SSDP, ARD, WS-Discovery, mDNS, Ubiquiti
