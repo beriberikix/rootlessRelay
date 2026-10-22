@@ -5,9 +5,18 @@
 // auth, policy and admin events, which must stay readable in a log aggregator.
 
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
+// Fields can carry what an unauthenticated client sent (an Origin header, an
+// unverified token's issuer); cap them so one request cannot write a
+// megabyte into the shipped logs.
+const MAX_STRING = 256;
+
+function clip(value) {
+  if (value instanceof Error) value = value.message;
+  if (typeof value !== "string" || value.length <= MAX_STRING) return value;
+  return `${value.slice(0, MAX_STRING)}…(+${value.length - MAX_STRING})`;
+}
 
 function formatValue(value) {
-  if (value instanceof Error) return value.message;
   if (typeof value === "string") {
     return /[\s"=]/.test(value) ? JSON.stringify(value) : value;
   }
@@ -28,12 +37,9 @@ function createLogger({
 
   function write(levelName, msg, extra) {
     if (LEVELS[levelName] < threshold) return;
-    const record = { ...fields, ...extra };
+    const record = Object.fromEntries(Object.entries({ ...fields, ...extra }).map(([key, value]) => [key, clip(value)]));
     if (json) {
-      const entry = { ts: new Date(now()).toISOString(), level: levelName, msg };
-      for (const [key, value] of Object.entries(record)) {
-        entry[key] = value instanceof Error ? value.message : value;
-      }
+      const entry = { ts: new Date(now()).toISOString(), level: levelName, msg, ...record };
       stream.write(`${JSON.stringify(entry)}\n`);
       return;
     }
@@ -60,4 +66,4 @@ function createLogger({
   return logger;
 }
 
-module.exports = { LEVELS, createLogger };
+module.exports = { LEVELS, MAX_STRING, createLogger };

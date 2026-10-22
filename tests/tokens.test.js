@@ -10,6 +10,7 @@ const { AuthError } = require("../server/public");
 const {
   ANON_ISSUER,
   createAnonIssuer,
+  rateKey,
   createApiTokenStore,
   createAuthenticator,
   createJwtVerifier,
@@ -306,4 +307,27 @@ test("a signed-in user acts in the org they name, and the verified email is expo
   assert.equal(inTeam.orgRole, "member");
   assert.equal((await authenticate(vouched, { orgId: dana.default_org_id })).orgRole, "owner");
   await db.close();
+});
+
+test("anonymous issuer: addresses that never return are swept; IPv6 is limited per /64", async () => {
+  const clock = { now: Date.UTC(2026, 9, 22) };
+  const anon = createAnonIssuer({ secret: "anon-secret", perIpPerHour: 2, now: () => clock.now });
+  for (let i = 0; i < 500; i++) await anon.issue({ ip: `2001:db8:${i.toString(16)}::1` });
+  assert.equal(anon.trackedKeys(), 500);
+  clock.now += 61 * 60 * 1000;
+  await anon.issue({ ip: "203.0.113.5" });
+  assert.equal(anon.trackedKeys(), 1, "an hour later, only the new address is held");
+
+  await anon.issue({ ip: "2001:db8:aa:bb::1" });
+  await anon.issue({ ip: "2001:db8:aa:bb:ffff:1:2:3" });
+  await assert.rejects(anon.issue({ ip: "2001:db8:aa:bb::99" }), (error) =>
+    error instanceof AuthError && error.code === "anon-token-rate-limited");
+  await anon.issue({ ip: "2001:db8:aa:bc::1" });
+
+  assert.equal(rateKey("203.0.113.5"), "203.0.113.5");
+  assert.equal(rateKey("::ffff:203.0.113.5"), "203.0.113.5");
+  assert.equal(rateKey("2001:0DB8:0000:00aa:1:2:3:4"), "2001:db8:0:aa::/64");
+  assert.equal(rateKey("2001:db8::1"), "2001:db8:0:0::/64");
+  assert.equal(rateKey("fe80::1%eth0"), "fe80:0:0:0::/64");
+  assert.equal(rateKey("::1"), "0:0:0:0::/64");
 });

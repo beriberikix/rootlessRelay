@@ -18,7 +18,8 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: npm ci --no-audit --no-fund
+      # As in the Dockerfile: only sqlite3's install script runs.
+      - run: npm ci --no-audit --no-fund --ignore-scripts && npm rebuild sqlite3
       - name: Unit tests
         run: npm test
       - name: Network tests

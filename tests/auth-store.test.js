@@ -133,3 +133,16 @@ test("concurrent first logins for one external identity yield one account", asyn
   assert.equal((await users.list()).length, 1);
   await db.close();
 });
+
+test("verifyPassword compares against a dummy hash when there is no password to check", async (t) => {
+  const db = openDatabase(":memory:");
+  await db.migrate();
+  const users = createUserStore(db, { bcryptRounds: 4 });
+  const bcrypt = require("bcryptjs");
+  const compare = t.mock.method(bcrypt, "compare");
+  const ext = await users.create({ username: "ext" }); // no password (SSO only)
+  assert.equal(await users.verifyPassword(null, "anything"), false);
+  assert.equal(await users.verifyPassword(ext, "anything"), false);
+  assert.equal(compare.mock.callCount(), 2);
+  await db.close();
+});

@@ -184,3 +184,35 @@ test("operators add, re-role and remove members; the last owner stays", async ()
     await ctx.close();
   }
 });
+
+test("creating a user refuses an unknown tier", async () => {
+  const ctx = await start();
+  try {
+    const post = (body) => call(ctx.port, { method: "POST", path: "/api/users", cookie: ctx.cookie, body });
+    const refused = await post({ username: "carol", tier: "platinum" });
+    assert.equal(refused.status, 400);
+    assert.match(refused.json().error, /unknown tier/);
+    assert.ok(!(await ctx.users.findByUsername("carol")), "nothing was stored");
+    assert.equal((await post({ username: "carol", tier: "user" })).status, 201);
+    assert.equal((await post({ username: "dave" })).status, 201, "no tier is still allowed");
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("password sign-in runs a hash comparison whether or not the operator exists", async (t) => {
+  const ctx = await start();
+  try {
+    const bcrypt = require("bcryptjs");
+    const compare = t.mock.method(bcrypt, "compare");
+    await ctx.users.create({ username: "erin", password: "password-2" }); // a user, not an operator
+    for (const username of ["nobody", "erin", "ops"]) {
+      const before = compare.mock.callCount();
+      const res = await call(ctx.port, { method: "POST", path: "/api/login", body: { username, password: "wrong-password" } });
+      assert.equal(res.status, 401, username);
+      assert.equal(compare.mock.callCount() - before, 1, `${username}: one comparison`);
+    }
+  } finally {
+    await ctx.close();
+  }
+});
