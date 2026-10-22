@@ -14,15 +14,17 @@ const { resolveTiers } = require("../policy/tiers");
 
 const quietLog = { debug() {}, info() {}, warn() {}, error() {} };
 
-function call(port, { method = "GET", path = "/", cookie = null, body } = {}) {
+// As the panel sends it; pass extra headers (or null to drop it) to test refusals.
+function call(port, { method = "GET", path = "/", cookie = null, body, headers: extra = {} } = {}) {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? null : JSON.stringify(body);
-    const headers = { ...(cookie ? { Cookie: cookie } : {}), ...(payload ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } : {}) };
+    const headers = { "X-Requested-With": "relaynet-admin", ...(cookie ? { Cookie: cookie } : {}), ...(payload ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } : {}), ...extra };
+    for (const [k, v] of Object.entries(headers)) if (v === null) delete headers[k];
     const req = http.request({ host: "127.0.0.1", port, method, path, headers }, (res) => {
       let data = "";
       res.setEncoding("utf8");
       res.on("data", (chunk) => { data += chunk; });
-      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, json: () => (data ? JSON.parse(data) : null) }));
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, text: data, json: () => (data ? JSON.parse(data) : null) }));
     });
     req.on("error", reject);
     if (payload) req.write(payload);

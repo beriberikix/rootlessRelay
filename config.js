@@ -235,6 +235,12 @@ function resolveConfig(env = process.env) {
     logJson: parseBool(env.LOG_JSON, defaults.logJson),
 
     adminPublicPath: env.ADMIN_PUBLIC_PATH || null,
+    // Serve the admin app on the public port to requests for this hostname
+    // (e.g. admin.example.com), at its root.
+    adminPublicHost: env.ADMIN_PUBLIC_HOST ? env.ADMIN_PUBLIC_HOST.trim().toLowerCase() : null,
+    // Other hostnames the admin app answers to (loopback names and IP
+    // literals always work), e.g. a private reverse proxy's name.
+    adminAllowedHosts: parseList(env.ADMIN_ALLOWED_HOSTS)?.map((h) => h.toLowerCase()) || null,
     adminAuthDbPath: env.ADMIN_AUTH_DB_PATH || null,
     adminSessionSecret,
     adminSessionSecretIsDefault: adminSessionSecret === DEFAULT_SESSION_SECRET,
@@ -269,6 +275,14 @@ function resolveConfig(env = process.env) {
   if (config.adminPublicPath && !config.adminPublicPath.startsWith("/")) {
     throw new ConfigError("ADMIN_PUBLIC_PATH must start with /");
   }
+  if (config.adminPublicHost && !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(config.adminPublicHost)) {
+    throw new ConfigError("ADMIN_PUBLIC_HOST must be a hostname such as admin.example.com (no scheme or port)");
+  }
+  if ((config.adminPublicPath || config.adminPublicHost) && config.adminCookieSecure && !config.adminTrustProxy) {
+    warnings.push(
+      "the admin app is public with ADMIN_COOKIE_SECURE=true but ADMIN_TRUST_PROXY=false; behind a TLS-terminating proxy the session cookie is never set",
+    );
+  }
 
   if (config.hosted) {
     if (config.adminSessionSecretIsDefault) {
@@ -287,6 +301,11 @@ function resolveConfig(env = process.env) {
     if (config.adminPublicPath && !config.adminCookieSecure) {
       throw new ConfigError(
         "ADMIN_PUBLIC_PATH requires ADMIN_COOKIE_SECURE=true",
+      );
+    }
+    if (config.adminPublicHost && !config.adminCookieSecure) {
+      throw new ConfigError(
+        "ADMIN_PUBLIC_HOST requires ADMIN_COOKIE_SECURE=true",
       );
     }
     if (!config.allowedOrigins) {
