@@ -50,7 +50,6 @@ test("env overrides win over mode defaults", () => {
   const config = resolveConfig({
     ...HOSTED_MIN,
     AUTH_REQUIRED: "false",
-    INBOUND_RULES_ENABLED: "true",
     EGRESS_DENY_PORTS: "25,465,587",
     EGRESS_DENY_UDP_PORTS: "",
     EGRESS_ALLOW_CIDRS: "127.0.0.0/8, 10.1.0.0/16",
@@ -59,7 +58,6 @@ test("env overrides win over mode defaults", () => {
     TIERS_JSON: '{"anon":{"maxSessionMs":60000}}',
   });
   assert.equal(config.authRequired, false);
-  assert.equal(config.inboundRulesEnabled, true);
   assert.deepEqual(config.egressDenyPorts, [25, 465, 587]);
   assert.deepEqual(config.egressDenyUdpPorts, [], "empty turns the UDP list off");
   assert.deepEqual(config.egressAllowCidrs, ["127.0.0.0/8", "10.1.0.0/16"]);
@@ -70,6 +68,11 @@ test("env overrides win over mode defaults", () => {
   assert.equal(config.trustProxyHops, 2);
   assert.deepEqual(config.tiersJson, { anon: { maxSessionMs: 60000 } });
   assert.deepEqual(config.sessionAllowedOrigins, config.allowedOrigins, "sessions default to ALLOWED_ORIGINS");
+});
+
+test("hosted mode refuses inbound rules: they forward to a pool address another tenant may get", () => {
+  assert.throws(() => resolveConfig({ ...HOSTED_MIN, INBOUND_RULES_ENABLED: "true" }), /INBOUND_RULES_ENABLED/);
+  assert.equal(resolveConfig({ RELAY_MODE: "local", INBOUND_RULES_ENABLED: "true" }).inboundRulesEnabled, true);
 });
 
 test("SESSION_ALLOWED_ORIGINS overrides the session origin list; * allows any", () => {

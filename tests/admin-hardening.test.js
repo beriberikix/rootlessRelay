@@ -37,7 +37,7 @@ function call(port, { method = "GET", path: urlPath = "/", headers = {}, body } 
   });
 }
 
-async function start(t) {
+async function start(t, env = {}) {
   const config = resolveConfig({
     RELAY_MODE: "hosted",
     ADMIN_SESSION_SECRET: "s",
@@ -48,6 +48,7 @@ async function start(t) {
     ADMIN_TRUST_PROXY: "true",
     METRICS_ENABLED: "true",
     METRICS_PUBLIC: "true",
+    ...env,
   });
   const db = openDatabase(":memory:");
   await db.migrate();
@@ -137,6 +138,19 @@ test("ADMIN_PUBLIC_HOST: the public port serves the panel for that name only, an
   assert.equal(status, 404);
 });
 
+test("ADMIN_PRIVATE_METRICS_ONLY: the admin port serves /metrics and nothing else; the public name serves the panel", async (t) => {
+  const { adminPort, publicPort } = await start(t, { ADMIN_PRIVATE_METRICS_ONLY: "true" });
+  assert.equal((await call(adminPort, { path: "/metrics", headers: { Host: "abc.vm.relay.internal:8001" } })).status, 200);
+  for (const urlPath of ["/", "/api/auth/status", "/auth/login"]) {
+    assert.equal((await call(adminPort, { path: urlPath, headers: { Host: "localhost" } })).status, 404, urlPath);
+  }
+  const login = await call(adminPort, { method: "POST", path: "/api/login", headers: { Host: "localhost", "X-Requested-With": "relaynet-admin" }, body: { username: "x", password: "y" } });
+  assert.equal(login.status, 404);
+  assert.equal((await call(publicPort, { path: "/", headers: { Host: ADMIN_HOST } })).status, 200);
+  assert.equal((await call(publicPort, { path: "/api/auth/status", headers: { Host: ADMIN_HOST } })).status, 200);
+  assert.equal((await call(publicPort, { path: "/metrics", headers: { Host: ADMIN_HOST } })).status, 401);
+});
+
 test("ADMIN_PUBLIC_HOST must be a bare hostname and needs secure cookies", () => {
   const base = { RELAY_MODE: "hosted", ADMIN_SESSION_SECRET: "s", ANON_TOKEN_SECRET: "a" };
   assert.throws(() => resolveConfig({ ...base, ADMIN_PUBLIC_HOST: ADMIN_HOST }), /ADMIN_COOKIE_SECURE/);
@@ -147,4 +161,5 @@ test("ADMIN_PUBLIC_HOST must be a bare hostname and needs secure cookies", () =>
   assert.equal(ok.adminPublicHost, "admin.example.test");
   const noProxy = resolveConfig({ ...base, ADMIN_COOKIE_SECURE: "true", ADMIN_TRUST_PROXY: "false", ADMIN_PUBLIC_HOST: ADMIN_HOST });
   assert.ok(noProxy.warnings.some((w) => /ADMIN_TRUST_PROXY/.test(w)));
+  assert.ok(resolveConfig({ ...base, ADMIN_PRIVATE_METRICS_ONLY: "true" }).warnings.some((w) => /ADMIN_PRIVATE_METRICS_ONLY/.test(w)));
 });

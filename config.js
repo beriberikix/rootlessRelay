@@ -241,6 +241,9 @@ function resolveConfig(env = process.env) {
     // Other hostnames the admin app answers to (loopback names and IP
     // literals always work), e.g. a private reverse proxy's name.
     adminAllowedHosts: parseList(env.ADMIN_ALLOWED_HOSTS)?.map((h) => h.toLowerCase()) || null,
+    // The admin port serves only /metrics; the panel is reached through
+    // ADMIN_PUBLIC_HOST. Keeps the panel off a shared private network.
+    adminPrivateMetricsOnly: parseBool(env.ADMIN_PRIVATE_METRICS_ONLY, false),
     adminAuthDbPath: env.ADMIN_AUTH_DB_PATH || null,
     adminSessionSecret,
     adminSessionSecretIsDefault: adminSessionSecret === DEFAULT_SESSION_SECRET,
@@ -298,6 +301,11 @@ function resolveConfig(env = process.env) {
     if (config.egressPolicy === "open") {
       throw new ConfigError("EGRESS_POLICY=open is not allowed in hosted mode");
     }
+    // Rules forward to a pool address, which is reassigned to whichever
+    // tenant connects next (AD-4).
+    if (config.inboundRulesEnabled) {
+      throw new ConfigError("INBOUND_RULES_ENABLED is not allowed in hosted mode");
+    }
     if (config.adminPublicPath && !config.adminCookieSecure) {
       throw new ConfigError(
         "ADMIN_PUBLIC_PATH requires ADMIN_COOKIE_SECURE=true",
@@ -306,6 +314,11 @@ function resolveConfig(env = process.env) {
     if (config.adminPublicHost && !config.adminCookieSecure) {
       throw new ConfigError(
         "ADMIN_PUBLIC_HOST requires ADMIN_COOKIE_SECURE=true",
+      );
+    }
+    if (config.adminPrivateMetricsOnly && !config.adminPublicHost && !config.adminPublicPath) {
+      warnings.push(
+        "ADMIN_PRIVATE_METRICS_ONLY is set without ADMIN_PUBLIC_HOST; the operator panel is unreachable",
       );
     }
     if (!config.allowedOrigins) {

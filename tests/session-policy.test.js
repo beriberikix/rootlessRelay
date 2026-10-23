@@ -351,6 +351,41 @@ test("createPolicyFactory picks the identity tier and falls back to user", () =>
   assert.equal(buildTcpReset({ srcIP: "1.1.1.1", srcPort: 1, dstIP: "2.2.2.2", dstPort: 2 }).length, 40);
 });
 
+test("SYN and DNS rates are shared by an owner's sessions, not multiplied by them (DP-4)", () => {
+  const clock = 0;
+  const tiers = resolveTiers({ user: { synPerSec: 2, dnsQps: 1 } }, {
+    rateLimitBps: 1024, dnsServerIp: "8.8.8.8", maxUdpFlows: 8, maxConnectionsPerIp: 2, enableVmToVm: false,
+  });
+  const factory = createPolicyFactory({
+    config: { antiSpoof: true }, tiers, egress: createEgressPolicy({ mode: "open" }), ctx: makeCtx(), now: () => clock,
+  });
+  const open = (owner, id) => {
+    const policy = factory.forSession({ kind: "user", owner, tier: "user" });
+    return { policy, session: attach(policy, fakeSession(id)) };
+  };
+  const syn = ({ policy, session }, srcPort) => policy.allowTcpConnect(session, {
+    srcIP: "10.0.2.15", srcPort, dstIP: "1.1.1.1", dstPort: 443, seqNum: 1,
+  });
+  const a = open("org:1", "a");
+  const b = open("org:1", "b");
+  const other = open("org:2", "c");
+  assert.equal(syn(a, 1), true);
+  assert.equal(syn(b, 2), true);
+  assert.equal(syn(b, 3), false, "the owner's third SYN in a second is over synPerSec=2, whichever session sends it");
+  assert.equal(syn(a, 4), false);
+  assert.equal(syn(other, 5), true, "another owner has its own budget");
+  assert.equal(a.policy.allowUdpSend(a.session, "8.8.8.8", 53, true, 40), true);
+  assert.equal(b.policy.allowUdpSend(b.session, "8.8.8.8", 53, true, 40), false, "dnsQps=1 across both sessions");
+
+  assert.equal(factory.sharedOwnerCount(), 2);
+  a.policy.onSessionClose(a.session);
+  b.policy.onSessionClose(b.session);
+  b.policy.onSessionClose(b.session);
+  assert.equal(factory.sharedOwnerCount(), 1, "the owner's entry goes when its last session closes");
+  other.policy.onSessionClose(other.session);
+  assert.equal(factory.sharedOwnerCount(), 0);
+});
+
 test("a flood of denied destinations is summarised, not stored row by row", () => {
   const rows = [];
   const audit = { record: (row) => rows.push(row), finish() {} };

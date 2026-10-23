@@ -109,8 +109,13 @@ function createUsageMeter({
     return (await periodUsage(fake)) >= tier.quotaBytes;
   }
 
+  // VM-to-VM bytes count once, as the sender's upload (MT-5).
+  function meteredSent(session) {
+    return (session.bytesSent || 0) - (session.peerBytesSent || 0);
+  }
+
   function track(session) {
-    tracked.set(session, { lastSent: session.bytesSent || 0, lastReceived: session.bytesReceived || 0 });
+    tracked.set(session, { lastSent: meteredSent(session), lastReceived: session.bytesReceived || 0 });
     const q = quotaKey(session);
     if (q.store === "db") loadDbTotal(q.orgId, q.month).catch((error) => log?.warn("usage load failed", { error }));
   }
@@ -127,7 +132,7 @@ function createUsageMeter({
   function takeDelta(session) {
     const state = tracked.get(session);
     if (!state) return null;
-    const sent = session.bytesSent || 0;
+    const sent = meteredSent(session);
     const received = session.bytesReceived || 0;
     const delta = { out: Math.max(0, sent - state.lastSent), in: Math.max(0, received - state.lastReceived) };
     state.lastSent = sent;

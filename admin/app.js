@@ -207,6 +207,10 @@ function createAdminApp({
   const csp = panelCsp(adminHtmlPath);
 
   app.use((req, res, next) => {
+    if (config.adminPrivateMetricsOnly && !req.adminPublic && req.path !== "/metrics") {
+      res.status(404).json({ error: "not found" });
+      return;
+    }
     // The metrics scraper on a private network may address the machine by
     // any name; /metrics has its own access rule below.
     if (!(req.path === "/metrics" && !req.adminPublic) && !hostAllowed(req, config)) {

@@ -4,6 +4,23 @@
 
 ### Security
 
+- Hosted mode refuses `INBOUND_RULES_ENABLED=true` at startup. Rules
+  forward to a pool address, and the pool hands that address to whichever
+  tenant connects next. relaynet audit 2026-10-21, AD-4.
+- `ADMIN_PRIVATE_METRICS_ONLY`: the admin port answers only `/metrics`, so on
+  a private network shared with other apps the panel is reachable only
+  through `ADMIN_PUBLIC_HOST`. relaynet audit 2026-10-21, CI-7.
+- SYN and DNS rate limits are shared by all of an owner's open sessions
+  instead of applying to each one, so opening more sessions no longer
+  multiplies the scan or query budget. Bandwidth limits stay per session.
+  relaynet audit 2026-10-21, DP-4.
+
+### Fixed
+
+- Traffic between two VMs of the same owner counted against the quota twice,
+  once as the sender's upload and once as the receiver's download. It now
+  counts once, as the upload. relaynet audit 2026-10-21, MT-5.
+
 - With `JWT_VERIFIED_CLAIM` set, a first sign-in whose address the IdP has
   not verified gets `403 email-not-verified` and creates no account; before,
   it created a pending account named `<iss>|<sub>` that never took a real

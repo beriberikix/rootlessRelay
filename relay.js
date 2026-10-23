@@ -359,6 +359,9 @@ class VMSession {
     this.vmMACBytes = null;
     this.bytesSent = 0;
     this.bytesReceived = 0;
+    // HOSTED: bytes delivered from another of the owner's VMs. The sender's
+    // upload already counted them, so usage leaves them out (MT-5).
+    this.peerBytesSent = 0;
 
     this.udpFlows = new UDPFlowManager({
       idleTimeoutMs: UDP_FLOW_IDLE_TIMEOUT_MS,
@@ -1352,7 +1355,7 @@ class VMSession {
           if (log_level >= LOG_LEVEL_DEBUG) {
             console.log(`   -> Relaying to ${session.vmIP}`);
           }
-          session.sendIPToVM(ipPacket);
+          if (session.sendIPToVM(ipPacket)) session.peerBytesSent += ipPacket.length; // HOSTED
         }
       });
       return;
@@ -1368,7 +1371,7 @@ class VMSession {
         if (log_level >= LOG_LEVEL_DEBUG) {
           console.log(`🔄 Routing to VM ${dstIP}`);
         }
-        targetSession.sendIPToVM(ipPacket);
+        if (targetSession.sendIPToVM(ipPacket)) targetSession.peerBytesSent += ipPacket.length; // HOSTED
         return;
       }
     }
@@ -2424,7 +2427,7 @@ class VMSession {
   sendIPToVM(ipPacket, callback) {
     if (!this.policy.admitDownload(this, ipPacket)) { // HOSTED: download budget
       if (callback) callback(new Error("rate limited"));
-      return;
+      return false;
     }
     this.bytesSent += ipPacket.length;
     const frame = Buffer.alloc(14 + ipPacket.length);
@@ -2442,6 +2445,7 @@ class VMSession {
     ipPacket.copy(frame, 14);
 
     this.sendToVM(frame, callback);
+    return true;
   }
 
   resumeTCPTransportWaiters() {
