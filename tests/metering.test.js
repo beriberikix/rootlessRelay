@@ -178,6 +178,28 @@ test("usage for a deleted org is dropped, not written back", async () => {
   await database.close();
 });
 
+test("VM-to-VM bytes count once, as the sender's upload (MT-5)", async () => {
+  const database = await db();
+  await database.run("INSERT INTO orgs (id, name, personal, tier, created_at) VALUES (9, 'pair', 0, 'user', '2026-10-01')");
+  const tiers = resolveTiers(null, { rateLimitBps: 1, dnsServerIp: "8.8.8.8", maxUdpFlows: 8, maxConnectionsPerIp: 2, enableVmToVm: true });
+  const usage = createUsageMeter({ db: database, tiers, now: () => Date.UTC(2026, 9, 14, 12), flushIntervalMs: 1e9, log: quietLog });
+  const identity = { kind: "user", owner: "org:9", orgId: 9, userId: 1, tier: "user" };
+  const a = { sessionId: "a", identity, clientIP: "1.1.1.1", bytesSent: 0, bytesReceived: 0, peerBytesSent: 0 };
+  const b = { sessionId: "b", identity, clientIP: "1.1.1.1", bytesSent: 0, bytesReceived: 0, peerBytesSent: 0 };
+  usage.track(a);
+  usage.track(b);
+  // A uploads 1000 bytes, 600 of them to B; B also downloads 200 from the internet.
+  a.bytesReceived = 1000;
+  b.bytesSent = 800;
+  b.peerBytesSent = 600;
+  await usage.flush();
+  assert.equal(await usage.periodUsage(a), 1200);
+  const row = await database.get("SELECT bytes_in, bytes_out FROM org_usage_monthly WHERE org_id = 9");
+  assert.deepEqual({ ...row }, { bytes_in: 1000, bytes_out: 200 });
+  usage.close();
+  await database.close();
+});
+
 test("metrics can be disabled with no-op instruments", async () => {
   const metrics = createMetrics({ enabled: false });
   metrics.sessionsGauge.inc({ tier: "anon" });

@@ -120,6 +120,7 @@ class SessionPolicy {
     now = Date.now,
     setTimer = setTimeout,
     clearTimer = clearTimeout,
+    ownerLimits = null,
   }) {
     this.tier = tier;
     this.identity = identity;
@@ -141,8 +142,11 @@ class SessionPolicy {
     this.peerReleasing = false;
 
     this.uploadLimiter = tier.uploadBps === null ? null : new SlidingWindowRateLimiter(tier.uploadBps, 1000, now);
-    this.synLimiter = makeLimiter(tier.synPerSec, now);
-    this.dnsLimiter = makeLimiter(tier.dnsQps, now);
+    // SYN and DNS rates are per owner when the factory shares them, so more
+    // sessions do not mean a bigger scan or query budget (DP-4).
+    this.ownerLimits = ownerLimits;
+    this.synLimiter = ownerLimits ? ownerLimits.syn : makeLimiter(tier.synPerSec, now);
+    this.dnsLimiter = ownerLimits ? ownerLimits.dns : makeLimiter(tier.dnsQps, now);
     this.allowedTcpPorts = tier.allowedTcpPorts ? new Set(tier.allowedTcpPorts) : null;
     this.allowedUdpPorts = tier.allowedUdpPorts ? new Set(tier.allowedUdpPorts) : null;
     this.dnsServers = tier.dnsServers ? new Set(tier.dnsServers) : null;
@@ -549,6 +553,8 @@ class SessionPolicy {
     this.pendingConnects.clear();
     this.deniedAt.clear();
     if (this.audit) this.flushAuditSummary(session);
+    this.ownerLimits?.release();
+    this.ownerLimits = null;
   }
 
   // Writes one row summarising audit rows skipped in the last window.
@@ -627,10 +633,36 @@ function createPolicyFactory({
 }) {
   const poolBytes = ctx.poolPrefix.split(".").filter(Boolean).map(Number);
   const policyCtx = { ...ctx, poolBytes };
+  // owner + tier -> limiters shared by that owner's open sessions.
+  const shared = new Map();
+
+  function ownerLimitsFor(identity, tier) {
+    const key = `${identity.owner}\0${identity.tier}`;
+    let entry = shared.get(key);
+    if (!entry) {
+      entry = { syn: makeLimiter(tier.synPerSec, now), dns: makeLimiter(tier.dnsQps, now), refs: 0 };
+      shared.set(key, entry);
+    }
+    entry.refs += 1;
+    let released = false;
+    return {
+      syn: entry.syn,
+      dns: entry.dns,
+      release() {
+        if (released) return;
+        released = true;
+        entry.refs -= 1;
+        if (entry.refs === 0) shared.delete(key);
+      },
+    };
+  }
+
   return {
+    sharedOwnerCount: () => shared.size,
     forSession(identity) {
       const tier = tiers[identity.tier] || tiers.user;
       return new SessionPolicy({
+        ownerLimits: ownerLimitsFor(identity, tier),
         tier,
         identity,
         egress,

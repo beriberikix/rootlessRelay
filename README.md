@@ -258,6 +258,10 @@ unauthenticated local-mode sessions). Defaults:
 | Sessions per account / per address | 1 / 2 | 4 / `MAX_CONNECTIONS_PER_IP` | 10 |
 | Quota | 200 MB per day per address | 20 GB per month | none |
 
+Bandwidth and connection counts apply to each session; the connection and
+DNS rates are shared by all of an account's sessions. Traffic between an
+account's own VMs counts against the quota once.
+
 Override any field with `TIERS_JSON`, for example
 `TIERS_JSON='{"user":{"quotaBytes":53687091200},"anon":{"maxSessionMs":600000}}'`.
 `null` means unlimited. Operators can move an account to another tier from the
@@ -358,7 +362,7 @@ pending account directly.
 | `EGRESS_DENY_UDP_PORTS` | UDP-only deny list, checked before the allow list. Hosted mode denies UDP reflector services (chargen, SNMP, CLDAP, SSDP, mDNS, memcached and others; see `policy/egress.js`); DNS and NTP stay open. Empty turns it off. | none | reflector ports |
 | `ANTI_SPOOF` | Lock each session to its first source IP and MAC. | `true` | `true` |
 | `TRUST_PROXY`, `TRUST_PROXY_HOPS`, `CLIENT_IP_HEADER` | Derive the client address from a trusted reverse proxy header. | `false` | `true`, `1`, `x-forwarded-for` |
-| `INBOUND_RULES_ENABLED` | Enable the reverse proxy and port-forward rules. | `true` | `false` |
+| `INBOUND_RULES_ENABLED` | Enable the reverse proxy and port-forward rules. Refused in hosted mode: rules target a pool address, which is reassigned between tenants. | `true` | `false` (cannot be enabled) |
 | `TIERS_JSON` | Tier overrides. | unset | unset |
 | `WS_HEARTBEAT_MS`, `SESSION_IDLE_TIMEOUT_MS` | Ping interval (terminate after two missed pongs) and a global idle timeout override. | `30000`, `0` | same |
 | `ADDRESS_HOLD_MS` | How long a closed session's address stays reserved for its owner's reconnect; `0` releases it at once. | `0` | `60000` |
@@ -372,6 +376,7 @@ pending account directly.
 | `ADMIN_SESSION_SECRET`, `ADMIN_BOOTSTRAP_USERNAME`, `ADMIN_BOOTSTRAP_PASSWORD`, `ADMIN_TRUST_PROXY`, `ADMIN_COOKIE_SECURE` | Operator login. The bootstrap pair creates the first operator when none exists. | | secret required |
 | `ADMIN_PUBLIC_PATH` | Also mount the admin app on the public port under this prefix (single-port platforms; requires `ADMIN_COOKIE_SECURE=true`). | unset | unset |
 | `ADMIN_PUBLIC_HOST` | Also serve the admin app on the public port, at its root, to requests for this hostname (e.g. `admin.example.com`); relay sessions are refused there. Requires `ADMIN_COOKIE_SECURE=true` and, behind a TLS proxy, `ADMIN_TRUST_PROXY=true`. `METRICS_PUBLIC` never applies on the public port. Use SSO with MFA. | unset | unset |
+| `ADMIN_PRIVATE_METRICS_ONLY` | The admin port answers only `/metrics` (404 for everything else), so the panel is reachable only through `ADMIN_PUBLIC_HOST`. For hosts whose private network is shared with other apps. | `false` | unset |
 | `ADMIN_ALLOWED_HOSTS` | Other hostnames the admin app answers to. Loopback names, IP literals and `ADMIN_PUBLIC_HOST` always work; anything else gets 421 (DNS rebinding). | unset | unset |
 
 Set `LOG_LEVEL=0` in hosted deployments; the data plane logs every packet at
