@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Release assets
+
+- Each release now carries the npm package (`rootlessrelay-<version>.tgz`,
+  from `npm pack`), a CycloneDX SBOM of its production dependencies, and a
+  build-provenance attestation for the package
+  (`gh attestation verify rootlessrelay-<version>.tgz -R beriberikix/rootlessRelay`).
+  Depend on the attached tarball rather than GitHub's generated source
+  archive, which is not guaranteed to stay byte-identical. relaynet audit
+  2026-10-21, CI-9.
+
 ### Security
 
 - Hosted mode refuses `INBOUND_RULES_ENABLED=true` at startup. Rules
