@@ -4,6 +4,8 @@ This is a fork of [obegron/rootlessRelay](https://github.com/obegron/rootlessRel
 that adds a hosted, multi-tenant mode (accounts, organizations, tiers,
 metering, an operator panel). It runs [relaynet](https://relaynet.network).
 
+Everyone taking part follows the [code of conduct](CODE_OF_CONDUCT.md).
+
 ## Where changes go
 
 - **Hosted mode** (`auth/`, `admin/`, `metering/`, `policy/`, `server/`,

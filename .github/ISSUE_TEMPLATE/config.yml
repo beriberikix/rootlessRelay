@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security problem
+    url: https://relaynet.network/.well-known/security.txt
+    about: Email security@relaynet.network instead of opening an issue.
+  - name: relaynet.network account or billing
+    url: mailto:support@relaynet.network
+    about: Questions about an account on the hosted service.
