@@ -458,7 +458,7 @@ function createUserApi({
         }
         let created;
         try {
-          created = await store(orgInvites).create({ orgId, email: body.email, role: body.role, createdBy: identity.userId });
+          created = await store(orgInvites).create({ orgId, email: body.email ?? body.username, role: body.role, createdBy: identity.userId });
         } catch (error) {
           if (error instanceof RangeError) return [400, { error: error.message }];
           throw error;
@@ -494,6 +494,7 @@ function createUserApi({
         try {
           const joined = await store(orgInvites).accept(body && body.token, {
             id: identity.userId,
+            username: identity.username,
             email: identity.email,
             emailVerified: identity.emailVerified,
           });

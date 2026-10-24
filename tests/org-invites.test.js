@@ -44,7 +44,8 @@ test("create returns the token once and stores only its hash", async () => {
   assert.equal(listed.length, 1);
   assert.equal(listed[0].token, undefined, "listings never include tokens");
 
-  await assert.rejects(invites.create({ orgId: team.id, email: "nope", role: "member" }), RangeError);
+  await assert.rejects(invites.create({ orgId: team.id, email: "no pe", role: "member" }), RangeError);
+  await assert.rejects(invites.create({ orgId: team.id, email: "nope@", role: "member" }), RangeError);
   await assert.rejects(invites.create({ orgId: team.id, email: "a@b.co", role: "owner" }), RangeError);
 });
 
@@ -71,6 +72,29 @@ test("the invited address must match and be verified; a refused attempt does not
   await assert.rejects(invites.accept(token, { id: dana.id, email: null, emailVerified: true }), rejects(403, "email-not-verified"));
   assert.equal((await invites.list(team.id))[0].state, "open");
   assert.deepEqual(await invites.accept(token, verified(dana, "dana@example.com")), { orgId: team.id, role: "member" });
+});
+
+test("an invitation to a username is accepted by that account, with no verified address", async () => {
+  const { users, orgs, invites, owner, team } = await setup();
+  const frank = await users.create({ username: "Frank", password: "frank-password" });
+  const eve = await users.create({ username: "eve" });
+  const created = await invites.create({ orgId: team.id, email: " Frank ", role: "member", createdBy: owner.id });
+  assert.equal(created.email, "frank");
+
+  await assert.rejects(invites.accept(created.token, { id: eve.id, username: "eve", email: null, emailVerified: false }),
+    rejects(403, "invite-username-mismatch"));
+  // A verified address is no substitute for the named account.
+  await assert.rejects(invites.accept(created.token, { id: eve.id, username: "eve", email: "frank@example.com", emailVerified: true }),
+    rejects(403, "invite-username-mismatch"));
+  assert.deepEqual(await invites.accept(created.token, { id: frank.id, username: "Frank", email: null, emailVerified: false }),
+    { orgId: team.id, role: "member" });
+  assert.equal((await orgs.getMembership(team.id, frank.id)).role, "member");
+
+  // An address-shaped target still needs that verified address, whatever the username.
+  const addressed = await invites.create({ orgId: team.id, email: "grace@example.com", role: "member", createdBy: owner.id });
+  const lookalike = await users.create({ username: "grace@example.com", password: "grace-password" });
+  await assert.rejects(invites.accept(addressed.token, { id: lookalike.id, username: "grace@example.com", email: null, emailVerified: false }),
+    rejects(403, "email-not-verified"));
 });
 
 test("unknown, malformed, expired and revoked tokens are all the same answer", async () => {

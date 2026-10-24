@@ -26,6 +26,18 @@ function normalizeEmail(value) {
   return email.length <= 254 && EMAIL_RE.test(email) ? email : null;
 }
 
+// Who an invitation is for: an email address (accepted by an account whose
+// identity provider verified that address), or a username without "@"
+// (accepted by the account with that username, for relay accounts, which
+// have no verified address). Stored lowercased in org_invites.email.
+const USERNAME_TARGET_RE = /^[a-z0-9._+-]{1,128}$/;
+function normalizeTarget(value) {
+  if (typeof value !== "string") return null;
+  const target = value.trim().toLowerCase();
+  if (target.includes("@")) return normalizeEmail(target);
+  return USERNAME_TARGET_RE.test(target) ? target : null;
+}
+
 function publicInvite(row, at) {
   let state = "open";
   if (row.accepted_at) state = "accepted";
@@ -60,8 +72,8 @@ function createOrgInviteStore(db, { orgs, now = Date.now, ttlMs = DEFAULT_TTL_MS
     // has an open invitation replaces it (the old token stops working), which
     // doubles as "resend". The token is returned once.
     async create({ orgId, email, role, createdBy = null }) {
-      const normalized = normalizeEmail(email);
-      if (!normalized) throw new RangeError("email must be a valid address");
+      const normalized = normalizeTarget(email);
+      if (!normalized) throw new RangeError("email must be a valid address or a username");
       if (!INVITABLE_ROLES.includes(role)) throw new RangeError(`role must be one of ${INVITABLE_ROLES.join(", ")}`);
       const token = `${TOKEN_PREFIX}${randomBytes(24).toString("base64url")}`;
       const created = await db.transaction(async () => {
@@ -99,7 +111,7 @@ function createOrgInviteStore(db, { orgs, now = Date.now, ttlMs = DEFAULT_TTL_MS
       return result.changes > 0;
     },
 
-    // Accepts for `user` ({ id, email, emailVerified }). An unknown, used,
+    // Accepts for `user` ({ id, username, email, emailVerified }). An unknown, used,
     // revoked or expired token is one answer (404 invite-invalid); a live
     // token needs a verified address that matches the invited one. The claim
     // and the membership are one transaction, so a concurrent second accept
@@ -112,8 +124,14 @@ function createOrgInviteStore(db, { orgs, now = Date.now, ttlMs = DEFAULT_TTL_MS
         const row = await db.get("SELECT * FROM org_invites WHERE token_hash = ?", [hashToken(token)]);
         const live = row && !row.accepted_at && !row.revoked_at && new Date(row.expires_at).getTime() > now();
         if (!live) throw new OrgError(404, "invite-invalid");
-        if (!user.emailVerified || !user.email) throw new OrgError(403, "email-not-verified");
-        if (user.email.toLowerCase() !== row.email) throw new OrgError(403, "invite-email-mismatch");
+        if (!row.email.includes("@")) {
+          if (typeof user.username !== "string" || user.username.toLowerCase() !== row.email) {
+            throw new OrgError(403, "invite-username-mismatch");
+          }
+        } else {
+          if (!user.emailVerified || !user.email) throw new OrgError(403, "email-not-verified");
+          if (user.email.toLowerCase() !== row.email) throw new OrgError(403, "invite-email-mismatch");
+        }
         const claimed = await db.run(
           "UPDATE org_invites SET accepted_by = ?, accepted_at = ? WHERE id = ? AND accepted_at IS NULL AND revoked_at IS NULL",
           [user.id, iso(), row.id],

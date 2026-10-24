@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added (orgs)
+
+- Org invitations can name a username instead of an address (`{"username"}`,
+  or any `email` value without `@`). The account with that username accepts
+  it with no verified address, so relay accounts can join orgs. Address
+  invitations still need the identity provider to have verified the address,
+  whatever the accepting account's username is.
+
 ### Security
 
 - `body-parser` 1.20.9 (through Express, operator panel): GHSA-27r3-jxmh-p828,
