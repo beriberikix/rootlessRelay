@@ -1,0 +1,38 @@
+name: Bug report
+description: The relay doesn't behave as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems: don't file them here; email security@relaynet.network.
+        Never paste tokens, passwords or session cookies into an issue.
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options:
+        - local (RELAY_MODE=local)
+        - hosted (RELAY_MODE=hosted)
+        - relaynet.network (the hosted service)
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smallest steps that show it. For network problems include the guest (VM, stack), the protocol and the destination.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Version, configuration and logs
+      description: Relay version (package.json or release tag), relevant environment variables (no secrets), and log lines around the problem.
+      render: text
