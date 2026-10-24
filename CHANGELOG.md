@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Security
+
+- `body-parser` 1.20.9 (through Express, operator panel): GHSA-27r3-jxmh-p828,
+  a denial of service through trailing bytes after a compressed request body.
+
+### Added
+
+- Relay accounts: dashboard sign-in with a username and password held by the
+  relay, no identity provider needed (`USER_PASSWORD_LOGIN`). `POST
+  /api/auth/login` returns a sign-in token (`rs_…`, stored hashed, 12 hours
+  idle, 7 days at most) that works wherever an OIDC access token does;
+  `POST /api/auth/logout` revokes it; `GET /api/auth/config` says which
+  sign-in methods are on. Optional self sign-up (`USER_SIGNUP`, with an
+  invite code under `SIGNUP_MODE=invite`). Failures are throttled per
+  username and per address; operators can use it only where
+  `ADMIN_PASSWORD_LOGIN` is on; an operator setting a new password ends the
+  user's sign-ins. Schema version 6 adds `user_sessions`.
+- Zero-configuration hosted start: missing `ADMIN_SESSION_SECRET` and
+  `ANON_TOKEN_SECRET` are generated once and kept in `secrets.json` beside
+  the database (`GENERATE_SECRETS=false` to refuse instead), and with no
+  operator and no `ADMIN_BOOTSTRAP_*` the relay creates `admin` with a random
+  password and logs it once (`ADMIN_GENERATE_OPERATOR=false` to skip).
+  Deployments that set these are unaffected.
+
 ### Release assets
 
 - Each release now carries the npm package (`rootlessrelay-<version>.tgz`,

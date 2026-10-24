@@ -29,6 +29,19 @@ async function bootstrapOperator({ users, config, log }) {
     log?.info("bootstrapped initial operator", { username: config.adminBootstrapUsername });
     return;
   }
+  if (config.hosted && config.adminGenerateOperator) {
+    // Zero-configuration start: make one operator and print its password
+    // once. Change it in the panel after signing in.
+    const username = "admin";
+    if (await users.findByUsername(username)) {
+      log?.warn("no operator accounts, and the user \"admin\" exists but is not an operator; set ADMIN_BOOTSTRAP_USERNAME and ADMIN_BOOTSTRAP_PASSWORD");
+      return;
+    }
+    const password = require("node:crypto").randomBytes(15).toString("base64url");
+    await users.create({ username, password, role: "operator" });
+    log?.warn("created the first operator; this password is shown once, change it after signing in", { username, password });
+    return;
+  }
   // Keep the data plane running; admin logins fail until an operator exists.
   log?.warn(
     "no operator accounts found; set ADMIN_BOOTSTRAP_USERNAME and ADMIN_BOOTSTRAP_PASSWORD to create one",
@@ -186,6 +199,7 @@ function createAdminApp({
   config,
   users,
   apiTokens,
+  userSessions = null,
   invites = null,
   orgs = null,
   orgInvites = null,
@@ -649,6 +663,9 @@ function createAdminApp({
       }
       throw error;
     }
+    // A new password ends the user's dashboard sign-ins.
+    const ended = userSessions ? await userSessions.revokeForUser(id) : 0;
+    log?.info("password set", { userId: id, endedSignIns: ended, by: req.user.username });
     res.sendStatus(204);
   }));
 

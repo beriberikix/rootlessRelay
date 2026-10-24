@@ -8,6 +8,7 @@
 const fs = require("fs");
 const path = require("path");
 const { resolveConfig } = require("./config");
+const { withGeneratedSecrets } = require("./secrets");
 const { createLogger } = require("./log");
 const { createEgressPolicy } = require("./policy/egress");
 const { resolveTiers } = require("./policy/tiers");
@@ -15,6 +16,8 @@ const { createPolicyFactory } = require("./policy/session_policy");
 const { createAddressHolds } = require("./policy/address_holds");
 const { AuthError, createPublicServer } = require("./server/public");
 const { createUserApi } = require("./server/user_api");
+const { createAuthApi } = require("./server/auth_api");
+const { createUserSessionStore } = require("./auth/user_sessions");
 const { attachConnectionHandler, createSessionRegistry } = require("./server/connection");
 const { installLifecycle } = require("./server/lifecycle");
 const { openDatabase } = require("./auth/db");
@@ -43,9 +46,15 @@ function forwarder(ref, methods) {
 }
 
 function init(ctx) {
-  const config = resolveConfig(ctx.env || process.env);
+  const secrets = withGeneratedSecrets(ctx.env || process.env);
+  const config = resolveConfig(secrets.env);
   const log = createLogger({ json: config.logJson, level: "info" });
   for (const warning of config.warnings) log.warn(warning);
+  if (secrets.generated.length > 0) {
+    log.info("generated secrets", { names: secrets.generated, file: secrets.file });
+  } else if (secrets.loaded.length > 0) {
+    log.info("using generated secrets", { names: secrets.loaded, file: secrets.file });
+  }
   log.info("relay mode", {
     mode: config.mode,
     authRequired: config.authRequired,
@@ -177,6 +186,17 @@ function init(ctx) {
         log,
       })
       : null;
+    // Relay-account sign-in; GET /api/auth/config also answers when it is off.
+    const authApi = config.authRequired
+      ? createAuthApi({
+        config,
+        users: () => state.users,
+        userSessions: () => state.userSessions,
+        invites: () => state.invites,
+        ready,
+        log,
+      })
+      : null;
     const publicServer = createPublicServer({
       config,
       log,
@@ -189,6 +209,7 @@ function init(ctx) {
       handleAnonToken: config.anonEnabled ? handleAnonToken : null,
       metrics,
       userApi,
+      authApi,
       adminApp: config.adminPublicHost || config.adminPublicPath
         ? (req, res) => {
           if (state.adminApp) {
@@ -238,6 +259,11 @@ function init(ctx) {
     state.db = db;
     state.users = createUserStore(db);
     state.apiTokens = tokens.createApiTokenStore(db);
+    state.userSessions = createUserSessionStore(db);
+    const pruneSessions = setInterval(() => {
+      state.userSessions.prune().catch((error) => log.warn("sign-in session prune failed", { error }));
+    }, 60 * 60 * 1000);
+    pruneSessions.unref();
     state.invites = createInviteStore(db);
     state.orgs = createOrgStore(db);
     state.orgInvites = createOrgInviteStore(db, { orgs: state.orgs });
@@ -264,6 +290,7 @@ function init(ctx) {
       users: state.users,
       apiTokens: state.apiTokens,
       orgs: state.orgs,
+      userSessions: state.userSessions,
       anon: state.anon,
       jwt: state.jwt,
       log,
@@ -323,6 +350,7 @@ function init(ctx) {
         config,
         users: state.users,
         apiTokens: state.apiTokens,
+        userSessions: state.userSessions,
         invites: state.invites,
         orgs: state.orgs,
         orgInvites: state.orgInvites,

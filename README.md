@@ -75,6 +75,8 @@ These default values can be overridden by setting corresponding environment vari
 | `ADMIN_AUTH_DB_PATH`       | Path to the SQLite database used for admin users.                       | `./admin_auth.sqlite`       |
 | `ADMIN_BOOTSTRAP_USERNAME` | Initial admin username (required on first run if DB is empty).          | none                        |
 | `ADMIN_BOOTSTRAP_PASSWORD` | Initial admin password (required on first run if DB is empty).          | none                        |
+| `ADMIN_GENERATE_OPERATOR`  | Hosted mode with no operator and no bootstrap credentials: create `admin` with a random password and log it once. | `true`                      |
+| `GENERATE_SECRETS`         | Hosted mode: generate `ADMIN_SESSION_SECRET` (and `ANON_TOKEN_SECRET` when anon is on) if unset, and keep them in `secrets.json` beside the database. Set values always win. | `true`                      |
 | `ADMIN_LOGIN_WINDOW_MS`    | Sliding window for failed login attempts.                               | `600000` (10 minutes)       |
 | `ADMIN_LOGIN_MAX_ATTEMPTS` | Max failed attempts per IP+username within the login window.            | `6`                         |
 | `ADMIN_TRUST_PROXY`        | Trust reverse proxy headers for IP/session security settings.            | `false`                     |
@@ -209,7 +211,7 @@ individually in either mode.
 | Inbound rules (reverse proxy / port forwards) | enabled | disabled |
 | Client IP behind a proxy | socket address | `X-Forwarded-For` (`TRUST_PROXY`) |
 | Audit log, metrics, JSON logs | off | on |
-| Startup validation | warn on default secret | refuse default secret, require `ANON_TOKEN_SECRET`, refuse `EGRESS_POLICY=open` |
+| Startup validation | warn on default secret | refuse default secret, require `ANON_TOKEN_SECRET` when anon is on (both generated on first start if unset, see `GENERATE_SECRETS`), refuse `EGRESS_POLICY=open` |
 
 ### Connecting a client
 
@@ -281,11 +283,30 @@ admin port is only reachable over a private network.
 to the same response, for platforms that scrape one endpoint per app (for
 example Litestream's `http://127.0.0.1:9090/metrics`).
 
+### Relay accounts (password sign-in)
+
+With `USER_PASSWORD_LOGIN=true`, people sign in to a dashboard with a username
+and password held by the relay, with no identity provider. Accounts are made
+by an operator in the panel, or by sign-up when `USER_SIGNUP=true`.
+
+| Route | Purpose |
+|---|---|
+| `GET /api/auth/config` | `{ passwordLogin, signup, oidc }`: which sign-in methods this relay offers (`signup` is `null`, `"open"` or `"invite"`; `oidc` is the external JWT issuer and audience, if set). Always available. |
+| `POST /api/auth/login` | `{ "username", "password" }` → `{ token, expiresAt, user }`. 401 `invalid-credentials`; 429 after 10 failures per username or 50 per address in 15 minutes. |
+| `POST /api/auth/logout` | Revokes the bearer sign-in token. |
+| `POST /api/auth/signup` | `{ "username", "password", "code"? }` → 201 like login. 409 `username-taken`; 400 for a bad password (8 characters minimum) or invite code. |
+
+The token (`rs_…`) is a bearer token for `/api/me`, `/api/orgs` and the
+WebSocket, like an OIDC access token: it counts as a sign-in (it can create API
+tokens). It expires after 12 hours unused and 7 days after sign-in, and an
+operator setting a new password ends all of a user's sign-ins.
+
 ### Account API
 
 Signed-in users manage their own account on the public listener under
 `/api/me`, authenticated with `Authorization: Bearer <token>` where the token
-is an external JWT or one of their API tokens. Anonymous tokens are refused.
+is an external JWT, a relay-account sign-in token (below), or one of their API
+tokens. Anonymous tokens are refused.
 Browser origins must be in `ALLOWED_ORIGINS` (sessions: `SESSION_ALLOWED_ORIGINS`, `*` for any); CORS headers are emitted.
 
 | Route | Purpose |
@@ -296,10 +317,10 @@ Browser origins must be in `ALLOWED_ORIGINS` (sessions: `SESSION_ALLOWED_ORIGINS
 | `GET /api/me/sessions` | The org's live sessions (the selected org's, for members of a shared org). Each has `username` (who opened it), `own` (the caller's own) and `canClose` (whether `DELETE` would be allowed). Roles that cannot list members cannot list sessions either, so usernames reach nobody new. |
 | `DELETE /api/me/sessions/:id` | Close a session (code 1008): members close their own, owners and admins any in the org; otherwise 403 `forbidden`, exactly as `canClose` said. |
 | `GET /api/me/tokens` | The caller's API tokens (never the secrets). |
-| `POST /api/me/tokens` | Create a token: `{ "name", "expiresInDays"? }`. The secret is returned once. At most 20 active tokens. Needs a sign-in (external JWT), not an API token. |
+| `POST /api/me/tokens` | Create a token: `{ "name", "expiresInDays"? }`. The secret is returned once. At most 20 active tokens. Needs a sign-in (external JWT or relay account), not an API token. |
 | `DELETE /api/me/tokens/:id` | Revoke one of the caller's tokens and close sessions opened with it. Needs a sign-in. |
 | `POST /api/me/redeem` | Redeem an invite code: `{ "code" }`. Activates a pending account; 10 failed attempts per hour per account. |
-| `DELETE /api/me` | Delete the caller's account, tokens and usage: `{ "confirm": "<username>" }`. Orgs it alone belongs to are deleted with it; refused with 409 `sole-owner` while it solely owns an org that has other members. Needs a sign-in (external JWT), not an API token; operators are deleted from the admin panel. |
+| `DELETE /api/me` | Delete the caller's account, tokens and usage: `{ "confirm": "<username>" }`. Orgs it alone belongs to are deleted with it; refused with 409 `sole-owner` while it solely owns an org that has other members. Needs a sign-in (external JWT or relay account), not an API token; operators are deleted from the admin panel. |
 
 **Organizations.** Sessions, tokens, tier and usage belong to an org; members of
 an org share a private network, session cap and monthly quota. Every account
@@ -354,7 +375,9 @@ pending account directly.
 | `ADMIN_OIDC_ISSUER`, `ADMIN_OIDC_CLIENT_ID`, `ADMIN_OIDC_CLIENT_SECRET`, `ADMIN_OIDC_REDIRECT_URL` | Operator single sign-on for the admin panel (OIDC code flow). The callback path comes from the redirect URL; an operator's account must have the provider identity as `external_sub` (`<iss>\|<sub>`). | unset | unset |
 | `ADMIN_OIDC_REQUIRE_MFA`, `ADMIN_PASSWORD_LOGIN` | Refuse SSO logins whose ID token lacks `amr: ["mfa"]`; keep the password form. | `true`, `true` | same |
 | `JWT_ALGORITHMS`, `JWT_VERIFIED_CLAIM` | Allowed JWT algorithms; claim that must be `true` before the email becomes the username. With it set, a first sign-in without a verified address is refused (`403 email-not-verified`) instead of creating an account; existing accounts keep working, and one still named after its subject takes its address once verified. Also required for org invites: without it no address counts as verified. | `RS256`, unset | same |
-| `SIGNUP_MODE` | `open`, or `invite` to create new external accounts as pending until they redeem an invite code. | `open` | `open` |
+| `SIGNUP_MODE` | `open`, or `invite` to create new external accounts as pending until they redeem an invite code (and to require a code for `USER_SIGNUP`). | `open` | `open` |
+| `USER_PASSWORD_LOGIN` | Dashboard sign-in with a relay account (username and password) through `/api/auth/login`. Operators can use it only when `ADMIN_PASSWORD_LOGIN` is on. | `false` | `false` |
+| `USER_SIGNUP` | Self sign-up with a password through `/api/auth/signup` (needs `USER_PASSWORD_LOGIN`; an invite code when `SIGNUP_MODE=invite`). | `false` | `false` |
 | `ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call the HTTP APIs (`/api/me`, anonymous tokens) and, unless `SESSION_ALLOWED_ORIGINS` is set, to open sessions. | unset | unset (warns) |
 | `SESSION_ALLOWED_ORIGINS` | Browser origins allowed to open sessions; `*` for any. Safe to open up because sessions authenticate with a token, not a cookie. | `ALLOWED_ORIGINS` | `ALLOWED_ORIGINS` |
 | `ALLOW_QUERY_TOKEN` | Accept `?token=` on the upgrade URL (leaks into logs). | `false` | `false` |

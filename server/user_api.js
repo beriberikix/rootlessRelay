@@ -98,8 +98,12 @@ function createUserApi({
 
   // Managing credentials needs a sign-in. An API token alone must not mint or
   // revoke tokens, or a leaked token could outlive its own revocation.
+  // A person signed in to the dashboard (OIDC or a relay account), as opposed
+  // to an API token meant for VMs.
+  const signedIn = (identity) => identity.via === "jwt" || identity.via === "session";
+
   function requireSignIn(identity) {
-    if (identity.via !== "jwt") throw new AuthError(403, "sign-in-required");
+    if (!signedIn(identity)) throw new AuthError(403, "sign-in-required");
   }
 
   // Failed guesses per user in the last hour, to slow down guessing of
@@ -169,7 +173,7 @@ function createUserApi({
   // but only when signed in: an operator's API token is a credential for
   // VMs and acts like any member's.
   function principal(identity) {
-    return { userId: identity.userId, operator: identity.kind === "operator" && identity.via === "jwt" };
+    return { userId: identity.userId, operator: identity.kind === "operator" && signedIn(identity) };
   }
 
   // 404 for an org the caller has no role in, so ids cannot be probed.

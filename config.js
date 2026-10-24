@@ -146,6 +146,11 @@ function resolveConfig(env = process.env) {
     // "invite": accounts first seen through an external identity provider
     // start pending and cannot connect until they redeem an invite code.
     signupMode,
+    // Dashboard sign-in with a relay account (username and password) through
+    // /api/auth/login, and self sign-up through /api/auth/signup (an invite
+    // code is required when SIGNUP_MODE=invite).
+    userPasswordLogin: parseBool(env.USER_PASSWORD_LOGIN, false),
+    userSignup: parseBool(env.USER_SIGNUP, false),
 
     jwt: jwtConfigured
       ? {
@@ -249,6 +254,9 @@ function resolveConfig(env = process.env) {
     adminSessionSecretIsDefault: adminSessionSecret === DEFAULT_SESSION_SECRET,
     adminBootstrapUsername: env.ADMIN_BOOTSTRAP_USERNAME || null,
     adminBootstrapPassword: env.ADMIN_BOOTSTRAP_PASSWORD || null,
+    // With no operators and no ADMIN_BOOTSTRAP_*, hosted mode creates "admin"
+    // with a random password and logs it once.
+    adminGenerateOperator: parseBool(env.ADMIN_GENERATE_OPERATOR, true),
     adminTrustProxy: parseBool(env.ADMIN_TRUST_PROXY, trustProxy),
     // Operator sign-in through OIDC (all four required to enable it), and
     // whether the username/password form stays available.
@@ -319,6 +327,14 @@ function resolveConfig(env = process.env) {
     if (config.adminPrivateMetricsOnly && !config.adminPublicHost && !config.adminPublicPath) {
       warnings.push(
         "ADMIN_PRIVATE_METRICS_ONLY is set without ADMIN_PUBLIC_HOST; the operator panel is unreachable",
+      );
+    }
+    if (config.userSignup && !config.userPasswordLogin) {
+      throw new ConfigError("USER_SIGNUP requires USER_PASSWORD_LOGIN=true");
+    }
+    if (config.userSignup && config.signupMode === "open") {
+      warnings.push(
+        "USER_SIGNUP is on with SIGNUP_MODE=open: anyone who can reach the relay can create an account",
       );
     }
     if (!config.allowedOrigins) {
