@@ -704,7 +704,7 @@ test("org invitations: managers invite, invitees accept with a verified matching
     assert.equal((await call(stranger, "GET", base)).status, 404);
     assert.equal((await call(owner, "POST", base, { email: "dana@example.com", role: "member" }, { signedInAs: false })).status, 403, "needs a sign-in");
     assert.equal((await call(owner, "POST", base, { email: "dana@example.com", role: "owner" })).status, 400);
-    assert.equal((await call(owner, "POST", base, { email: "not-an-address", role: "member" })).status, 400);
+    assert.equal((await call(owner, "POST", base, { email: "not an address", role: "member" })).status, 400);
     const made = await call(owner, "POST", base, { email: "dana@example.com", role: "read_only" });
     assert.equal(made.status, 201);
     const token = made.json().token;
