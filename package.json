@@ -1,6 +1,6 @@
 {
   "name": "rootlessrelay",
-  "version": "0.7.0-hosted.12",
+  "version": "0.7.0-hosted.13",
   "description": "A WebSocket based VPN/proxy relay for virtual machines.",
   "main": "relay.js",
   "bin": {
@@ -16,6 +16,7 @@
     "udp_flow_manager.js",
     "config.js",
     "hosted.js",
+    "secrets.js",
     "log.js",
     "metrics.js",
     "admin/",

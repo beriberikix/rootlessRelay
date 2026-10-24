@@ -236,7 +236,7 @@ test("a removed member falls back to their personal org as default", async () =>
 
 test("migration 4 gives every existing user a personal org and carries tokens, tier and usage", async () => {
   const db = openDatabase(":memory:");
-  assert.deepEqual(MIGRATIONS.slice(-2).map((m) => m.version), [4, 5]);
+  assert.deepEqual(MIGRATIONS.slice(3, 5).map((m) => m.version), [4, 5]);
   const later = MIGRATIONS.splice(3);
   const generated = generateApiToken();
   try {
@@ -261,8 +261,8 @@ test("migration 4 gives every existing user a personal org and carries tokens, t
     MIGRATIONS.push(...later);
   }
 
-  assert.equal(await db.migrate(), 5);
-  assert.equal(await db.migrate(), 5, "running again is a no-op");
+  assert.equal(await db.migrate(), MIGRATIONS[MIGRATIONS.length - 1].version);
+  assert.equal(await db.migrate(), MIGRATIONS[MIGRATIONS.length - 1].version, "running again is a no-op");
 
   const users = createUserStore(db, { bcryptRounds: 4 });
   const orgs = createOrgStore(db);
@@ -366,7 +366,7 @@ test("migration 5 attributes earlier audit rows only where the user is unambiguo
   } finally {
     MIGRATIONS.push(...later);
   }
-  assert.equal(await db.migrate(), 5);
+  assert.equal(await db.migrate(), MIGRATIONS[MIGRATIONS.length - 1].version);
   const byId = Object.fromEntries((await db.all("SELECT session_id, user_id FROM connections_audit")).map((r) => [r.session_id, r.user_id]));
   assert.deepEqual(byId, { legacy: alice.id, personal: alice.id, shared: null, anon: null, malformed: null });
   await db.close();

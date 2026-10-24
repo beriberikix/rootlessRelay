@@ -229,6 +229,28 @@ const MIGRATIONS = [
       `);
     },
   },
+  {
+    // Dashboard sign-in with a relay account (USER_PASSWORD_LOGIN): opaque
+    // bearer tokens, stored hashed like API tokens, with an idle and an
+    // absolute expiry.
+    version: 6,
+    async up(db) {
+      await db.exec(`
+        CREATE TABLE user_sessions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          token_prefix TEXT NOT NULL,
+          token_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          last_used_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          revoked_at TEXT
+        );
+        CREATE INDEX user_sessions_prefix ON user_sessions(token_prefix);
+        CREATE INDEX user_sessions_user ON user_sessions(user_id);
+      `);
+    },
+  },
 ];
 
 // All access shares one sqlite3 connection, where a transaction is

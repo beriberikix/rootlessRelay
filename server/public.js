@@ -169,6 +169,7 @@ function createPublicServer({
   adminApp = null,
   metrics = null,
   userApi = null,
+  authApi = null,
 }) {
   const allowedOrigins = config.allowedOrigins ? new Set(config.allowedOrigins) : null;
   const sessionOrigins = config.sessionAllowedOrigins ? new Set(config.sessionAllowedOrigins) : null;
@@ -252,6 +253,16 @@ function createPublicServer({
         const message = status >= 500 ? "internal-error" : error.code || error.message || "error";
         writeJson(res, status, { error: message }, corsHeaders(req));
       }
+      return;
+    }
+
+    if (authApi && authApi.matches(path)) {
+      if (req.headers.origin && !originAllowed(req.headers.origin)) {
+        writeJson(res, 403, { error: "origin not allowed" });
+        return;
+      }
+      const clientIP = resolveClientIP(req, config.clientIpOptions);
+      await authApi.handle(req, res, { path, clientIP, corsHeaders: corsHeaders(req) });
       return;
     }
 

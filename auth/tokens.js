@@ -10,6 +10,7 @@ const crypto = require("crypto");
 const jose = require("jose");
 const { AuthError, LOCAL_IDENTITY } = require("../server/public");
 const { roleAllows } = require("./orgs");
+const { parseSessionToken } = require("./user_sessions");
 
 const API_TOKEN_PREFIX = "rr_";
 const ANON_ISSUER = "rootlessrelay-anon";
@@ -330,7 +331,7 @@ async function resolveOrg({ orgs, user, orgId, requested = null, allowPending })
   return { org, role };
 }
 
-function createAuthenticator({ config, users, apiTokens, orgs, anon = null, jwt = null, log = null }) {
+function createAuthenticator({ config, users, apiTokens, orgs, userSessions = null, anon = null, jwt = null, log = null }) {
   return async function authenticate(token, { clientIP, allowPending = false, orgId: requestedOrg = null } = {}) {
     if (!token) {
       if (config.authRequired) throw new AuthError(401, "authentication-required");
@@ -346,6 +347,18 @@ function createAuthenticator({ config, users, apiTokens, orgs, anon = null, jwt 
       if (requestedOrg && requestedOrg !== result.orgId) throw new AuthError(403, "token-org-mismatch");
       const { org, role } = await resolveOrg({ orgs, user: result.user, orgId: result.orgId, allowPending });
       return { ...identityFor({ user: result.user, org, role, via: "api-token" }), tokenId: result.token.id };
+    }
+
+    // A dashboard sign-in with a relay account (password). Like a JWT
+    // sign-in, it acts in the user's default org or the one they name.
+    if (parseSessionToken(token)) {
+      if (!userSessions || !config.userPasswordLogin) throw new AuthError(401, "invalid-token");
+      const result = await userSessions.verify(token);
+      if (!result) throw new AuthError(401, "invalid-token");
+      if (!result.user) throw new AuthError(401, result.reason || "invalid-token");
+      checkStatus(result.user, allowPending);
+      const { org, role } = await resolveOrg({ orgs, user: result.user, orgId: result.user.default_org_id, requested: requestedOrg, allowPending });
+      return { ...identityFor({ user: result.user, org, role, via: "session" }), sessionId: result.session.id };
     }
 
     let unverified;
