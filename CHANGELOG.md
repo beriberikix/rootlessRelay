@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+### Added (egress budget)
+
+- Monthly egress budget (`BUDGET_THROTTLE_BYTES`, `BUDGET_PAUSE_BYTES`,
+  `BUDGET_THROTTLE_BPS`, `BUDGET_TIERS`): every session's bytes, all tiers,
+  count toward one UTC-month total stored in `relay_egress_monthly` (schema
+  version 7). Past the throttle threshold, sessions in the budget tiers that
+  start get a lower rate; past the pause threshold they close with
+  `1008 "free tier paused until <date>"` and are refused until the month
+  resets. Evaluated after every usage flush and at every admission. Off
+  unless both thresholds are set. An unknown tier in `BUDGET_TIERS` or
+  `JWT_DEFAULT_TIER` stops the relay at startup.
+- Operator override: `GET /api/budget`, and `POST /api/budget
+  {"forced": "open" | "paused" | null}` on the admin port, stored with the
+  month's row. Metrics `rootlessrelay_budget_bytes`,
+  `rootlessrelay_budget_threshold_bytes`, `rootlessrelay_budget_state` and
+  `rootlessrelay_budget_forced`.
+- `POST /api/anon/token` answers `503 free-tier-paused` (with `pausedUntil`)
+  or `503 relay-full` before issuing a token; `GET /api/auth/config` reports
+  `budget` and `pausedUntil`.
+
+### Changed
+
+- Refusals after authentication (per-address and per-account session
+  limits, address pool full, quota, budget pause) complete the WebSocket
+  handshake and close at once with 1013 (try later) or 1008 (don't retry)
+  and a reason, when the client offered `relay.v1`; browsers could only
+  see 1006 before. The pool-full reason is now `relay full`. Clients that
+  did not offer `relay.v1` still get the HTTP status.
+- Per-address session limits, the anonymous quota and the anonymous token's
+  address binding group IPv6 addresses by /64, as token issuance already
+  did. Anonymous tokens issued before this release are refused after the
+  upgrade (their binding changed).
+- The `session closed` log line includes the session's tier.
+
+### Fixed
+
+- Over-quota sessions are closed even when the usage flush cannot write to
+  SQLite (for example on a full disk); before, the error skipped the close.
+
 ### Added (orgs)
 
 - Org invitations can name a username instead of an address (`{"username"}`,

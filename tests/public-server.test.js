@@ -11,6 +11,7 @@ const {
   extractCredential,
   extractOrg,
   selectProtocol,
+  truncate,
 } = require("../server/public");
 
 const quietLog = { debug() {}, info() {}, warn() {}, error() {} };
@@ -56,6 +57,8 @@ async function startServer(overrides = {}) {
     lifecycle: { isShuttingDown: () => shuttingDown.value },
     sessionCount: () => connections.length,
     handleAnonToken: overrides.handleAnonToken || null,
+    budgetStatus: overrides.budgetStatus || null,
+    poolFull: overrides.poolFull || null,
   });
   server.wss.on("connection", (ws, _req, extra) => {
     connections.push({ ws, extra });
@@ -248,4 +251,73 @@ test("admission verdicts reject before the handshake", async () => {
   } finally {
     await server.close();
   }
+});
+
+// Resolves with the HTTP status of a refused upgrade, or with the close code
+// and reason of a socket the server opened and closed.
+function connectAndClose(port, protocols) {
+  return new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/`, protocols);
+    ws.on("unexpected-response", (_req, res) => {
+      res.resume();
+      resolve({ status: res.statusCode });
+      ws.terminate();
+    });
+    ws.on("close", (code, reason) => resolve({ status: 101, code, reason: reason.toString() }));
+    ws.on("error", () => {});
+  });
+}
+
+test("refusals after authentication close with a readable code; clients without relay.v1 get the HTTP status", async () => {
+  let verdict = { ok: false, status: 503, close: 1013, reason: "relay full" };
+  const { server, port, connections } = await startServer({ admission: { admit: () => verdict } });
+  try {
+    assert.deepEqual(await connectAndClose(port, ["relay.v1"]), { status: 101, code: 1013, reason: "relay full" });
+    verdict = { ok: false, status: 503, close: 1008, reason: "free tier paused until 2026-12-01" };
+    assert.deepEqual(await connectAndClose(port, ["relay.v1"]), { status: 101, code: 1008, reason: "free tier paused until 2026-12-01" });
+    assert.deepEqual(await connectAndClose(port, ["binary"]), { status: 503 }, "no relay.v1 offered: plain HTTP refusal");
+    assert.equal(connections.length, 0, "a refused socket never becomes a session");
+    // A verdict with no close code (legacy admission) stays an HTTP refusal.
+    verdict = { ok: false, status: 429, reason: "too many" };
+    assert.deepEqual(await connectAndClose(port, ["relay.v1"]), { status: 429 });
+  } finally {
+    await server.close();
+  }
+});
+
+test("the anon token endpoint says when the free tier is paused or the relay is full", async () => {
+  let budget = { state: "paused", pausedUntil: "2026-12-01" };
+  let full = false;
+  const { server, port } = await startServer({
+    env: { ALLOWED_ORIGINS: "https://demo.example" },
+    handleAnonToken: async () => ({ token: "t" }),
+    budgetStatus: () => budget,
+    poolFull: () => full,
+  });
+  const post = () => request(port, { method: "POST", path: "/api/anon/token", headers: { Origin: "https://demo.example" } });
+  try {
+    let res = await post();
+    assert.equal(res.status, 503);
+    assert.deepEqual(JSON.parse(res.body), { error: "free-tier-paused", pausedUntil: "2026-12-01" });
+    assert.equal(res.headers["access-control-allow-origin"], "https://demo.example");
+    budget = { state: "throttled", pausedUntil: null };
+    full = true;
+    res = await post();
+    assert.equal(res.status, 503);
+    assert.deepEqual(JSON.parse(res.body), { error: "relay-full" });
+    full = false;
+    assert.equal((await post()).status, 200);
+    const foreign = await request(port, { method: "POST", path: "/api/anon/token", headers: { Origin: "https://evil.example" } });
+    assert.equal(foreign.status, 403, "the origin check comes before the budget");
+  } finally {
+    await server.close();
+  }
+});
+
+test("close reasons are cut to 123 bytes at a character boundary", () => {
+  assert.equal(truncate("short"), "short");
+  const long = "é".repeat(100);
+  const cut = truncate(long);
+  assert.ok(Buffer.byteLength(cut) <= 123);
+  assert.equal(cut, "é".repeat(61));
 });

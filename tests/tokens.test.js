@@ -364,3 +364,13 @@ test("with a verified claim configured, a sign-in without a verified address cre
   const fay = await unchecked(await sign("sub-fay", {}), { allowPending: true });
   assert.equal(fay.username, "https://idp.example|sub-fay");
 });
+
+test("an anonymous token is bound to the address group: same /64 passes, another /64 is refused", async () => {
+  const anon = createAnonIssuer({ secret: "anon-secret", ttlMs: 60_000 });
+  const { token } = await anon.issue({ ip: "2001:db8:0:1::10" });
+  const identity = await anon.verify(token, { ip: "2001:db8:0:1:abcd::99" });
+  assert.equal(identity.tier, "anon", "a rotated privacy address in the same /64 keeps the token");
+  await assert.rejects(anon.verify(token, { ip: "2001:db8:0:2::10" }), /anon-token-ip-mismatch/);
+  const v4 = await anon.issue({ ip: "203.0.113.7" });
+  await assert.rejects(anon.verify(v4.token, { ip: "203.0.113.8" }), /anon-token-ip-mismatch/, "IPv4 stays exact");
+});

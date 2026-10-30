@@ -7,7 +7,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { resolveConfig } = require("./config");
+const { ConfigError, resolveConfig } = require("./config");
 const { withGeneratedSecrets } = require("./secrets");
 const { createLogger } = require("./log");
 const { createEgressPolicy } = require("./policy/egress");
@@ -29,6 +29,7 @@ const { SqliteSessionStore } = require("./auth/session_store");
 const tokens = require("./auth/tokens");
 const { createAuditLog, noopAudit } = require("./metering/audit");
 const { createUsageMeter, noopUsage } = require("./metering/usage");
+const { createBudget } = require("./metering/budget");
 const { createMetrics } = require("./metrics");
 const admin = require("./admin/app");
 
@@ -83,6 +84,20 @@ function init(ctx) {
     enableVmToVm: ctx.ENABLE_VM_TO_VM,
   });
 
+  // A tier name that does not exist would silently fall back to `user` and
+  // escape the budget, so a typo stops the relay instead.
+  for (const name of [...config.budgetTiers, ...(config.jwt && config.jwt.defaultTier ? [config.jwt.defaultTier] : [])]) {
+    if (!tiers[name]) {
+      throw new ConfigError(`unknown tier "${name}" in BUDGET_TIERS or JWT_DEFAULT_TIER; known tiers: ${Object.keys(tiers).join(", ")}`);
+    }
+  }
+  const budget = createBudget({
+    throttleBytes: config.budgetThrottleBytes,
+    pauseBytes: config.budgetPauseBytes,
+    throttleBps: config.budgetThrottleBps,
+    tiers: config.budgetTiers,
+  });
+
   const policyCtx = {
     GATEWAY_IP: ctx.GATEWAY_IP,
     DHCP_START: ctx.DHCP_START,
@@ -100,10 +115,18 @@ function init(ctx) {
   const auditRef = { current: noopAudit() };
   const usageRef = { current: noopUsage() };
   const audit = forwarder(auditRef, ["record", "finish", "flush", "prune", "query", "pendingCount", "close"]);
-  const usage = forwarder(usageRef, ["track", "untrack", "flush", "isOverQuota", "periodUsage", "monthly", "close"]);
+  const usage = forwarder(usageRef, [
+    "track", "untrack", "flush", "isOverQuota", "periodUsage", "monthly",
+    "evaluateBudget", "loadBudget", "setForced", "budgetStatus", "close",
+  ]);
+  // One view of the budget for every component; until the database opens,
+  // the placeholder meter reports "open".
+  const budgetStatus = () => usage.budgetStatus();
 
-  const registry = createSessionRegistry({ ctx: policyCtx, tiers });
-  const policyFactory = createPolicyFactory({ config, tiers, egress, ctx: policyCtx, audit, metrics, log });
+  const registry = createSessionRegistry({ ctx: policyCtx, tiers, budget, budgetStatus });
+  const policyFactory = createPolicyFactory({
+    config, tiers, egress, ctx: policyCtx, audit, metrics, log, budget, budgetStatus,
+  });
   const lifecycle = installLifecycle({
     servers: [],
     getSessions: () => registry.sessions.values(),
@@ -113,15 +136,17 @@ function init(ctx) {
     log,
   });
 
-  // Admission: registry caps first, then the byte quota for the identity.
+  // Admission: the budget's month first (rollover needs no traffic), then the
+  // registry caps, then the byte quota for the identity.
   const admission = {
     async admit(args) {
+      usage.evaluateBudget();
       const verdict = registry.admit(args);
       if (!verdict.ok) return verdict;
       try {
         if (await usage.isOverQuota(args)) {
           verdict.release();
-          return { ok: false, status: 429, reason: "quota exceeded" };
+          return { ok: false, status: 429, close: 1008, reason: "quota exceeded" };
         }
       } catch (error) {
         verdict.release();
@@ -194,6 +219,7 @@ function init(ctx) {
         userSessions: () => state.userSessions,
         invites: () => state.invites,
         ready,
+        budgetStatus,
         log,
       })
       : null;
@@ -210,6 +236,11 @@ function init(ctx) {
       metrics,
       userApi,
       authApi,
+      budgetStatus: () => {
+        usage.evaluateBudget();
+        return budgetStatus();
+      },
+      poolFull: () => registry.poolFull(),
       adminApp: config.adminPublicHost || config.adminPublicPath
         ? (req, res) => {
           if (state.adminApp) {
@@ -328,7 +359,16 @@ function init(ctx) {
       onQuotaExceeded: (session) => {
         if (session.ws && session.ws.readyState === 1) session.ws.close(1008, "quota exceeded");
       },
+      budget,
+      onBudgetChange: (prev, next) => {
+        log.info("budget state", { from: prev.state, to: next.state, bytes: next.bytes, forced: next.forced });
+        if (next.state === "paused") {
+          const closed = registry.closeTier(budget.tiers, 1008, `free tier paused until ${next.pausedUntil}`);
+          if (closed > 0) log.info("budget paused sessions", { closed });
+        }
+      },
     });
+    await usage.loadBudget();
     lifecycle.addFlusher(async () => {
       await usage.flush();
       await audit.flush();

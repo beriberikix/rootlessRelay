@@ -2,7 +2,8 @@
 
 // Dashboard sign-in with relay accounts (USER_PASSWORD_LOGIN):
 //
-//   GET  /api/auth/config   which sign-in methods this relay offers
+//   GET  /api/auth/config   which sign-in methods this relay offers, and
+//                           whether the budget has paused the free tiers
 //   POST /api/auth/login    {username, password} -> {token, expiresAt, user}
 //   POST /api/auth/logout   revokes the bearer session token
 //   POST /api/auth/signup   {username, password, code?} (USER_SIGNUP)
@@ -39,7 +40,16 @@ function createLimiter(limit, now) {
   };
 }
 
-function createAuthApi({ config, users, userSessions, invites = null, ready = null, log = null, now = Date.now }) {
+function createAuthApi({
+  config,
+  users,
+  userSessions,
+  invites = null,
+  ready = null,
+  budgetStatus = null,
+  log = null,
+  now = Date.now,
+}) {
   const store = (ref) => (typeof ref === "function" ? ref() : ref);
   const byUsername = createLimiter(FAILURES_PER_USERNAME, now);
   const byAddress = createLimiter(FAILURES_PER_ADDRESS, now);
@@ -122,10 +132,14 @@ function createAuthApi({ config, users, userSessions, invites = null, ready = nu
     try {
       if (ready) await ready;
       if (path === "/api/auth/config" && req.method === "GET") {
+        const budget = budgetStatus ? budgetStatus() : { state: "open", pausedUntil: null };
         writeJson(res, 200, {
           passwordLogin: config.userPasswordLogin,
           signup: config.userPasswordLogin && config.userSignup ? config.signupMode : null,
           oidc: config.jwt ? { issuer: config.jwt.issuer, audience: config.jwt.audience } : null,
+          // For a landing-page banner: whether the free tiers are open.
+          budget: budget.state,
+          pausedUntil: budget.pausedUntil,
         }, corsHeaders);
         return true;
       }

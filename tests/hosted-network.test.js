@@ -17,6 +17,7 @@ const {
   httpJson,
   listen,
   macFromNumber,
+  openAndClose,
   openWebSocket,
   startRelay,
 } = require("./helpers/relay_harness");
@@ -393,10 +394,10 @@ test("admission caps: anon sessions per token and per address, pool exhaustion r
     const token = await anonToken(relay);
     const first = await openWebSocket(relay.wsPort, { token });
     assert.equal(first.status, 101);
-    assert.equal((await openWebSocket(relay.wsPort, { token })).status, 429, "one session per anon token");
+    assert.deepEqual(await openAndClose(relay.wsPort, { token }), { status: 101, code: 1013, reason: "session limit reached for this account" }, "one session per anon token");
     const second = await openWebSocket(relay.wsPort, { token: await anonToken(relay) });
     assert.equal(second.status, 101);
-    assert.equal((await openWebSocket(relay.wsPort, { token: await anonToken(relay) })).status, 429, "two anon sessions per address");
+    assert.deepEqual(await openAndClose(relay.wsPort, { token: await anonToken(relay) }), { status: 101, code: 1013, reason: "connection limit reached for this address" }, "two anon sessions per address");
     first.ws.close();
     second.ws.close();
     await delay(50);
@@ -611,7 +612,7 @@ test("audit log, usage, metrics and quota enforcement", NETWORK, async () => {
     assert.equal(usageRes.body.quotaBytes, 2000);
     assert.ok(usageRes.body.currentPeriodBytes >= 2000, `usage ${usageRes.body.currentPeriodBytes}`);
     assert.equal(usageRes.body.months.length, 1);
-    assert.equal((await openWebSocket(relay.wsPort, { token: tokenRes.body.token })).status, 429, "over quota is refused at upgrade");
+    assert.deepEqual(await openAndClose(relay.wsPort, { token: tokenRes.body.token }), { status: 101, code: 1008, reason: "quota exceeded" }, "over quota is refused at upgrade");
 
     await delay(2500); // audit batch interval
     const auditRes = await httpJson(relay.adminPort, { path: `/api/audit?owner=org:${created.body.defaultOrgId}`, cookie });
@@ -786,4 +787,66 @@ test("hosted mode: a second DHCP exchange returns the session's address", NETWOR
   } finally {
     await relay.close();
   }
+});
+
+test("budget: past the pause threshold anon sessions close and are refused; the override reopens", NETWORK, async () => {
+  const relay = await startRelay({
+    hosted: true,
+    env: {
+      BUDGET_THROTTLE_BYTES: "100",
+      BUDGET_PAUSE_BYTES: "2000",
+      BUDGET_TIERS: "anon",
+      USAGE_FLUSH_INTERVAL_MS: "200",
+    },
+  });
+  try {
+    const cookie = await relay.adminCookie();
+    const open = await httpJson(relay.adminPort, { path: "/api/budget", cookie });
+    assert.equal(open.status, 200);
+    assert.deepEqual([open.body.state, open.body.throttleBytes, open.body.pauseBytes], ["open", 100, 2000]);
+
+    const { ws, status } = await openWebSocket(relay.wsPort, { token: await anonToken(relay) });
+    assert.equal(status, 101);
+    const closed = new Promise((resolve) => ws.once("close", (code, reason) => resolve({ code, reason: reason.toString() })));
+    // DHCP discovers and the relay's offers count as relayed bytes.
+    const pump = setInterval(() => ws.readyState === 1 && ws.send(buildDHCPDiscover(macFromNumber(7))), 20);
+    const closeEvent = await Promise.race([closed, delay(6000).then(() => null)]);
+    clearInterval(pump);
+    assert.ok(closeEvent, "the session is closed when the budget pauses");
+    assert.equal(closeEvent.code, 1008);
+    assert.match(closeEvent.reason, /^free tier paused until \d{4}-\d{2}-01$/);
+
+    const refused = await httpJson(relay.wsPort, { method: "POST", path: "/api/anon/token", body: {} });
+    assert.equal(refused.status, 503);
+    assert.equal(refused.body.error, "free-tier-paused");
+    assert.match(refused.body.pausedUntil, /^\d{4}-\d{2}-01$/);
+    const config = await httpJson(relay.wsPort, { path: "/api/auth/config" });
+    assert.equal(config.body.budget, "paused");
+
+    const paused = await httpJson(relay.adminPort, { path: "/api/budget", cookie });
+    assert.equal(paused.body.state, "paused");
+    assert.ok(paused.body.bytes >= 2000, `bytes ${paused.body.bytes}`);
+
+    assert.equal((await httpJson(relay.adminPort, { method: "POST", path: "/api/budget", cookie, body: { forced: "shut" } })).status, 400);
+    const reopened = await httpJson(relay.adminPort, { method: "POST", path: "/api/budget", cookie, body: { forced: "open" } });
+    assert.equal(reopened.status, 200);
+    assert.deepEqual([reopened.body.state, reopened.body.forced], ["open", "open"]);
+    const again = await openWebSocket(relay.wsPort, { token: await anonToken(relay) });
+    assert.equal(again.status, 101, "the override reopens the free tier");
+    again.ws.close();
+
+    const scraped = await httpJson(relay.adminPort, { path: "/metrics", headers: { Authorization: "Bearer scrape-me" } });
+    if (scraped.status === 200) {
+      assert.match(scraped.text, /rootlessrelay_budget_forced\{state="open"\} 1/);
+    }
+  } finally {
+    await relay.close();
+  }
+});
+
+test("an unknown tier in BUDGET_TIERS stops the relay at startup", NETWORK, async () => {
+  await assert.rejects(
+    startRelay({ hosted: true, env: { BUDGET_TIERS: "gold" } }),
+    /unknown tier "gold"/,
+  );
 });

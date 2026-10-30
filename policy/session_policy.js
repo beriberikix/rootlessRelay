@@ -630,6 +630,8 @@ function createPolicyFactory({
   metrics = null,
   log = null,
   now = Date.now,
+  budget = null,
+  budgetStatus = null,
 }) {
   const poolBytes = ctx.poolPrefix.split(".").filter(Boolean).map(Number);
   const policyCtx = { ...ctx, poolBytes };
@@ -660,7 +662,12 @@ function createPolicyFactory({
   return {
     sharedOwnerCount: () => shared.size,
     forSession(identity) {
-      const tier = tiers[identity.tier] || tiers.user;
+      let tier = tiers[identity.tier] || tiers.user;
+      // While the relay-wide budget is throttled, new sessions in the budget
+      // tiers start at the lower rate; sessions already open keep theirs.
+      if (budget && budgetStatus && budget.appliesTo(identity.tier) && budgetStatus().state === "throttled") {
+        tier = { ...tier, ...budget.throttledRates(tier) };
+      }
       return new SessionPolicy({
         ownerLimits: ownerLimitsFor(identity, tier),
         tier,

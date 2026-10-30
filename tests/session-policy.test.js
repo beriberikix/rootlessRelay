@@ -649,3 +649,28 @@ test("claiming a silent session's address with a new MAC takes it over and drops
   assert.equal(ctx.macToIP.has("52:54:00:00:00:30"), false);
   assert.equal(holder.ws.terminated, true);
 });
+
+test("while the budget is throttled, new budget-tier sessions start at the lower rate", () => {
+  const { createBudget } = require("../metering/budget");
+  let state = "open";
+  const budget = createBudget({ throttleBytes: 1, pauseBytes: 2, throttleBps: 1000, tiers: ["anon"] });
+  const factory = createPolicyFactory({
+    config: { antiSpoof: true },
+    tiers: TIERS,
+    egress: createEgressPolicy({ mode: "open" }),
+    ctx: makeCtx(),
+    budget,
+    budgetStatus: () => ({ state }),
+  });
+  const anon = { kind: "anon", owner: "anon:1", tier: "anon" };
+  const user = { kind: "user", owner: "org:1", tier: "user" };
+  const before = factory.forSession(anon);
+  assert.equal(before.tier, TIERS.anon, "open: the tier as configured");
+  state = "throttled";
+  const throttled = factory.forSession(anon);
+  assert.equal(throttled.tier.downloadBps, Math.min(TIERS.anon.downloadBps ?? Infinity, 1000));
+  assert.equal(throttled.tier.uploadBps, Math.min(TIERS.anon.uploadBps ?? Infinity, 1000));
+  assert.equal(throttled.tier.maxSessionMs, TIERS.anon.maxSessionMs, "only the rates change");
+  assert.equal(factory.forSession(user).tier, TIERS.user, "other tiers are not throttled");
+  assert.equal(before.tier, TIERS.anon, "a session that already exists keeps its policy");
+});

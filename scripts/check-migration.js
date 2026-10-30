@@ -113,6 +113,10 @@ async function checkMigration(file) {
       );
       check("rows that name no user are not attributed", overreach === 0, `${overreach} attributed without a basis`);
     }
+    if (target >= 7 && before.version < 7) {
+      check("the egress budget table exists and starts empty",
+        (await hasTable(db, "relay_egress_monthly")) && (await scalar(db, "SELECT COUNT(*) FROM relay_egress_monthly")) === 0);
+    }
     return { before, after, checks, ok: checks.every((c) => c.ok) };
   } finally {
     await db.close();

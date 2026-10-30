@@ -6,13 +6,17 @@
 
 const crypto = require("crypto");
 const { LOCAL_IDENTITY } = require("./public");
-const { resolveClientIP } = require("./client_ip");
+const { rateKey, resolveClientIP } = require("./client_ip");
 
 const WS_OPEN = 1;
 const SWEEP_INTERVAL_MS = 5000;
 const MISSED_PONGS_LIMIT = 2;
 
-function createSessionRegistry({ ctx, tiers }) {
+// Per-address limits key on the address group (rateKey: IPv6 by /64), so one
+// subscriber's many IPv6 addresses count as one. `budget` and `budgetStatus`
+// (metering/budget.js, metering/usage.js) let admission refuse budget tiers
+// while the relay-wide budget is paused.
+function createSessionRegistry({ ctx, tiers, budget = null, budgetStatus = null }) {
   const sessions = new Map();
   const byOwner = new Map();
   const perIP = new Map();
@@ -54,31 +58,41 @@ function createSessionRegistry({ ctx, tiers }) {
       const set = byOwner.get(owner);
       return (set ? set.size : 0) + (reservedByOwner.get(owner) || 0);
     },
-    countForIP(ip) {
-      return (perIP.get(ip) || 0) + (reservedByIP.get(ip) || 0);
+    countForIP(key) {
+      return (perIP.get(key) || 0) + (reservedByIP.get(key) || 0);
+    },
+    poolFull() {
+      return poolInUse() + reservedTotal >= poolCapacity();
     },
     // On success the caller holds a reservation and must call release()
     // once: after registering the session, or when the upgrade fails.
-    admit({ identity, clientIP }) {
+    // Refusals carry `close`, the WebSocket close code a browser can read.
+    admit({ identity, clientIP, clientKey = rateKey(clientIP) }) {
       const tier = tiers[identity.tier] || tiers.user;
-      if (tier.maxSessionsPerIP !== null && this.countForIP(clientIP) >= tier.maxSessionsPerIP) {
-        return { ok: false, status: 429, reason: "connection limit reached for this address" };
+      if (budget && budgetStatus && budget.appliesTo(identity.tier)) {
+        const status = budgetStatus();
+        if (status.state === "paused") {
+          return { ok: false, status: 503, close: 1008, reason: `free tier paused until ${status.pausedUntil}` };
+        }
+      }
+      if (tier.maxSessionsPerIP !== null && this.countForIP(clientKey) >= tier.maxSessionsPerIP) {
+        return { ok: false, status: 429, close: 1013, reason: "connection limit reached for this address" };
       }
       if (tier.maxSessionsPerOwner !== null && this.countFor(identity.owner) >= tier.maxSessionsPerOwner) {
-        return { ok: false, status: 429, reason: "session limit reached for this account" };
+        return { ok: false, status: 429, close: 1013, reason: "session limit reached for this account" };
       }
-      if (poolInUse() + reservedTotal >= poolCapacity()) {
-        return { ok: false, status: 503, reason: "address pool exhausted" };
+      if (this.poolFull()) {
+        return { ok: false, status: 503, close: 1013, reason: "relay full" };
       }
       bump(reservedByOwner, identity.owner, 1);
-      bump(reservedByIP, clientIP, 1);
+      bump(reservedByIP, clientKey, 1);
       reservedTotal += 1;
       let released = false;
       const release = () => {
         if (released) return;
         released = true;
         bump(reservedByOwner, identity.owner, -1);
-        bump(reservedByIP, clientIP, -1);
+        bump(reservedByIP, clientKey, -1);
         reservedTotal -= 1;
       };
       return { ok: true, release };
@@ -88,7 +102,8 @@ function createSessionRegistry({ ctx, tiers }) {
       const owner = session.identity.owner;
       if (!byOwner.has(owner)) byOwner.set(owner, new Set());
       byOwner.get(owner).add(session);
-      perIP.set(session.clientIP, (perIP.get(session.clientIP) || 0) + 1);
+      const key = session.clientKey || rateKey(session.clientIP);
+      perIP.set(key, (perIP.get(key) || 0) + 1);
     },
     remove(session) {
       if (!sessions.delete(session.sessionId)) return;
@@ -97,9 +112,10 @@ function createSessionRegistry({ ctx, tiers }) {
         set.delete(session);
         if (set.size === 0) byOwner.delete(session.identity.owner);
       }
-      const count = (perIP.get(session.clientIP) || 1) - 1;
-      if (count <= 0) perIP.delete(session.clientIP);
-      else perIP.set(session.clientIP, count);
+      const key = session.clientKey || rateKey(session.clientIP);
+      const count = (perIP.get(key) || 1) - 1;
+      if (count <= 0) perIP.delete(key);
+      else perIP.set(key, count);
     },
     kill(sessionId, code = 1008, reason = "terminated by operator") {
       const session = sessions.get(sessionId);
@@ -142,6 +158,18 @@ function createSessionRegistry({ ctx, tiers }) {
       }
       return count;
     },
+    // Closes every session in the given tiers (the budget pausing them).
+    closeTier(tierNames, code = 1008, reason = "free tier paused") {
+      const names = new Set(tierNames);
+      let count = 0;
+      for (const session of sessions.values()) {
+        if (session.identity && names.has(session.identity.tier)) {
+          session.ws.close(code, reason);
+          count += 1;
+        }
+      }
+      return count;
+    },
     killOwner(owner, code = 1008, reason = "account suspended") {
       const set = byOwner.get(owner);
       if (!set) return 0;
@@ -171,6 +199,7 @@ function attachConnectionHandler(wss, {
   wss.on("connection", (ws, req, extra = {}) => {
     const identity = extra.identity || LOCAL_IDENTITY;
     const clientIP = extra.clientIP || resolveClientIP(req, config.clientIpOptions || {});
+    const clientKey = extra.clientKey || rateKey(clientIP);
     const tier = tiers[identity.tier] || tiers.user;
 
     try {
@@ -182,9 +211,10 @@ function attachConnectionHandler(wss, {
       log?.debug("failed to tune transport socket", { error });
     }
 
-    ctx.connectionsPerIP.set(clientIP, (ctx.connectionsPerIP.get(clientIP) || 0) + 1);
+    ctx.connectionsPerIP.set(clientKey, (ctx.connectionsPerIP.get(clientKey) || 0) + 1);
 
     const session = new VMSession(ws, clientIP, req.socket);
+    session.clientKey = clientKey;
     const sessionId = randomUUID();
     session.sessionId = sessionId;
     session.identity = identity;
@@ -289,9 +319,9 @@ function attachConnectionHandler(wss, {
       closed = true;
       for (const timer of timers) clearInterval(timer);
       if (idleTimer) clearTimeout(idleTimer);
-      const remaining = (ctx.connectionsPerIP.get(clientIP) || 1) - 1;
-      if (remaining <= 0) ctx.connectionsPerIP.delete(clientIP);
-      else ctx.connectionsPerIP.set(clientIP, remaining);
+      const remaining = (ctx.connectionsPerIP.get(clientKey) || 1) - 1;
+      if (remaining <= 0) ctx.connectionsPerIP.delete(clientKey);
+      else ctx.connectionsPerIP.set(clientKey, remaining);
 
       try {
         session.policy.onSessionClose(session);
@@ -307,6 +337,7 @@ function attachConnectionHandler(wss, {
         sessionId,
         clientIP,
         owner: identity.owner,
+        tier: identity.tier,
         code,
         reason,
         bytesSent: session.bytesSent,
