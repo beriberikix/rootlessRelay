@@ -2,8 +2,14 @@
 
 // Per-owner byte metering and quotas. Account usage is accumulated per
 // calendar month in SQLite (org_usage_monthly); anonymous usage is kept in memory
-// per client address per day. Sessions are sampled on a timer and on close,
-// so a crash loses at most one flush interval.
+// per client address (IPv6 by /64) per day. Sessions are sampled on a timer
+// and on close, so a crash loses at most one flush interval.
+//
+// The meter also keeps the relay-wide month total for the egress budget
+// (metering/budget.js): every session's bytes, whatever its tier, stored in
+// relay_egress_monthly, and the budget state derived from it.
+
+const { STATES, createDisabledBudget } = require("./budget");
 
 function monthKey(ts) {
   const date = new Date(ts);
@@ -13,6 +19,8 @@ function monthKey(ts) {
 function dayKey(ts) {
   return new Date(ts).toISOString().slice(0, 10);
 }
+
+const FORCED_VALUES = new Set(["open", "paused", null]);
 
 function noopUsage() {
   return {
@@ -29,6 +37,14 @@ function noopUsage() {
     async monthly() {
       return [];
     },
+    evaluateBudget() {},
+    async loadBudget() {},
+    async setForced() {
+      throw new Error("starting");
+    },
+    budgetStatus() {
+      return { month: null, bytes: 0, throttleBytes: null, pauseBytes: null, state: "open", forced: null, pausedUntil: null };
+    },
     close() {},
   };
 }
@@ -40,6 +56,8 @@ function createUsageMeter({
   flushIntervalMs = 30000,
   now = Date.now,
   onQuotaExceeded = null,
+  budget = createDisabledBudget(),
+  onBudgetChange = null,
   metrics = null,
   log = null,
 }) {
@@ -50,13 +68,22 @@ function createUsageMeter({
   const dbTotals = new Map(); // "month:<key>:<orgId>" -> bytes (cache of org_usage_monthly + unflushed)
   let flushing = null;
 
+  // Relay-wide budget: the current month's total (authoritative), the bytes
+  // not yet stored (by month, so a month's tail is stored after rollover),
+  // the operator override, and the last evaluated status.
+  let relayMonth = monthKey(now());
+  let relayBytes = 0;
+  const relayPending = new Map(); // month -> bytes
+  let forced = null;
+  let lastStatus = { state: "open", pausedUntil: null };
+
   function tierFor(session) {
     const identity = session.identity || {};
     return tiers[identity.tier] || tiers.user;
   }
 
   // Quota accounting key: accounts by user id and month, anonymous demo
-  // sessions by client address and day.
+  // sessions by client address group (clientKey: IPv6 by /64) and day.
   function quotaKey(session, ts = now()) {
     const identity = session.identity || {};
     const tier = tierFor(session);
@@ -64,7 +91,8 @@ function createUsageMeter({
       return { store: "db", key: `month:${monthKey(ts)}:${identity.orgId}`, orgId: identity.orgId, month: monthKey(ts) };
     }
     const period = tier.quotaPeriod === "day" ? dayKey(ts) : monthKey(ts);
-    return { store: "memory", key: `${tier.quotaPeriod}:${period}:${session.clientIP}` };
+    const address = session.clientKey || session.clientIP;
+    return { store: "memory", key: `${tier.quotaPeriod}:${period}:${address}` };
   }
 
   const loading = new Map(); // key -> in-flight load, so deltas applied meanwhile are kept
@@ -102,10 +130,10 @@ function createUsageMeter({
     return memoryTotals.get(q.key) || 0;
   }
 
-  async function isOverQuota({ identity, clientIP }) {
+  async function isOverQuota({ identity, clientIP, clientKey }) {
     const tier = tiers[identity.tier] || tiers.user;
     if (tier.quotaBytes === null) return false;
-    const fake = { identity, clientIP };
+    const fake = { identity, clientIP, clientKey };
     return (await periodUsage(fake)) >= tier.quotaBytes;
   }
 
@@ -141,6 +169,16 @@ function createUsageMeter({
     return delta;
   }
 
+  // A new UTC month starts the budget over. Bytes not yet stored stay queued
+  // under their own month, so the next flush still writes them there.
+  function rollover(ts = now()) {
+    const month = monthKey(ts);
+    if (month === relayMonth) return;
+    relayMonth = month;
+    relayBytes = 0;
+    forced = null;
+  }
+
   const pendingDb = new Map(); // "orgId|month" -> { orgId, month, in, out, sessions }
 
   function applyDelta(session, delta, closing = false) {
@@ -149,6 +187,9 @@ function createUsageMeter({
     metrics?.bytesCounter?.inc({ direction: "from_vm", tier: session.identity?.tier || "local" }, delta.in);
     const q = quotaKey(session);
     const total = delta.in + delta.out;
+    rollover();
+    relayBytes += total;
+    if (total > 0) relayPending.set(relayMonth, (relayPending.get(relayMonth) || 0) + total);
     if (q.store === "db") {
       const pendingKey = `${q.orgId}|${q.month}`;
       const pending = pendingDb.get(pendingKey) || { orgId: q.orgId, month: q.month, in: 0, out: 0, sessions: 0 };
@@ -163,57 +204,150 @@ function createUsageMeter({
     return (memoryTotals.get(q.key) || 0) >= (tier.quotaBytes ?? Infinity);
   }
 
+  function budgetStatus() {
+    return {
+      month: relayMonth,
+      bytes: relayBytes,
+      throttleBytes: budget.throttleBytes,
+      pauseBytes: budget.pauseBytes,
+      state: lastStatus.state,
+      forced,
+      pausedUntil: lastStatus.pausedUntil,
+    };
+  }
+
+  function setGauges() {
+    metrics?.budgetBytes?.set(relayBytes);
+    if (budget.enabled) {
+      metrics?.budgetThresholdBytes?.set({ threshold: "throttle" }, budget.throttleBytes);
+      metrics?.budgetThresholdBytes?.set({ threshold: "pause" }, budget.pauseBytes);
+    }
+    for (const state of STATES) metrics?.budgetState?.set({ state }, lastStatus.state === state ? 1 : 0);
+    for (const state of ["open", "paused"]) metrics?.budgetForced?.set({ state }, forced === state ? 1 : 0);
+  }
+
+  // Recomputes the budget state. Called after every flush (also a failed
+  // one) and at every admission, so month rollover needs no traffic.
+  function evaluateBudget(ts = now()) {
+    rollover(ts);
+    const next = budget.evaluate({ bytes: relayBytes, forced, now: ts });
+    const changed = next.state !== lastStatus.state || next.pausedUntil !== lastStatus.pausedUntil;
+    if (!changed) {
+      setGauges();
+      return;
+    }
+    const prev = budgetStatus();
+    lastStatus = next;
+    setGauges();
+    onBudgetChange?.(prev, budgetStatus());
+  }
+
+  // Startup: the stored month total and override, added to anything counted
+  // before the database answered.
+  async function loadBudget(ts = now()) {
+    rollover(ts);
+    if (db) {
+      const row = await db.get("SELECT bytes, forced FROM relay_egress_monthly WHERE month = ?", [relayMonth]);
+      if (row) {
+        relayBytes += row.bytes;
+        forced = row.forced || null;
+      }
+    }
+    evaluateBudget(ts);
+  }
+
+  async function setForced(value, by = null) {
+    if (!FORCED_VALUES.has(value)) throw new RangeError("forced must be open, paused or null");
+    rollover();
+    if (db) {
+      await db.run(
+        "INSERT INTO relay_egress_monthly (month, forced) VALUES (?, ?) " +
+        "ON CONFLICT(month) DO UPDATE SET forced = excluded.forced",
+        [relayMonth, value],
+      );
+    }
+    forced = value;
+    log?.info("budget override", { forced: value, by });
+    evaluateBudget();
+    return budgetStatus();
+  }
+
+  async function writePending(rows, budgetRows) {
+    await db.transaction(async () => {
+      for (const row of rows) {
+        // Bytes that arrive after their org was deleted (its sessions
+        // close after the rows go) are dropped, not written back as a
+        // row for an org that no longer exists. Org ids are never reused.
+        await db.run(
+          "INSERT INTO org_usage_monthly (org_id, month, bytes_in, bytes_out, sessions) " +
+          "SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM orgs WHERE id = ?) " +
+          "ON CONFLICT(org_id, month) DO UPDATE SET bytes_in = bytes_in + excluded.bytes_in, " +
+          "bytes_out = bytes_out + excluded.bytes_out, sessions = sessions + excluded.sessions",
+          [row.orgId, row.month, row.in, row.out, row.sessions, row.orgId],
+        );
+      }
+      for (const [month, bytes] of budgetRows) {
+        await db.run(
+          "INSERT INTO relay_egress_monthly (month, bytes) VALUES (?, ?) " +
+          "ON CONFLICT(month) DO UPDATE SET bytes = bytes + excluded.bytes",
+          [month, bytes],
+        );
+      }
+    });
+  }
+
   async function flush() {
     if (flushing) return flushing;
     flushing = (async () => {
       const exceeded = [];
-      for (const session of tracked.keys()) {
-        const delta = takeDelta(session);
-        if (!delta) continue;
-        if (applyDelta(session, delta)) exceeded.push(session);
-      }
-      if (db && pendingDb.size > 0) {
-        const rows = [...pendingDb.values()];
-        pendingDb.clear();
-        try {
-          await db.transaction(async () => {
+      try {
+        for (const session of tracked.keys()) {
+          const delta = takeDelta(session);
+          if (!delta) continue;
+          if (applyDelta(session, delta)) exceeded.push(session);
+        }
+        if (db && (pendingDb.size > 0 || relayPending.size > 0)) {
+          const rows = [...pendingDb.values()];
+          const budgetRows = [...relayPending.entries()];
+          pendingDb.clear();
+          relayPending.clear();
+          try {
+            await writePending(rows, budgetRows);
+          } catch (error) {
+            // The transaction rolled back: put the rows back for the next flush.
             for (const row of rows) {
-              // Bytes that arrive after their org was deleted (its sessions
-              // close after the rows go) are dropped, not written back as a
-              // row for an org that no longer exists. Org ids are never reused.
-              await db.run(
-                "INSERT INTO org_usage_monthly (org_id, month, bytes_in, bytes_out, sessions) " +
-                "SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM orgs WHERE id = ?) " +
-                "ON CONFLICT(org_id, month) DO UPDATE SET bytes_in = bytes_in + excluded.bytes_in, " +
-                "bytes_out = bytes_out + excluded.bytes_out, sessions = sessions + excluded.sessions",
-                [row.orgId, row.month, row.in, row.out, row.sessions, row.orgId],
-              );
+              const key = `${row.orgId}|${row.month}`;
+              const pending = pendingDb.get(key) || { orgId: row.orgId, month: row.month, in: 0, out: 0, sessions: 0 };
+              pending.in += row.in;
+              pending.out += row.out;
+              pending.sessions += row.sessions;
+              pendingDb.set(key, pending);
             }
-          });
-        } catch (error) {
-          // The transaction rolled back: put the rows back for the next flush.
-          for (const row of rows) {
-            const key = `${row.orgId}|${row.month}`;
-            const pending = pendingDb.get(key) || { orgId: row.orgId, month: row.month, in: 0, out: 0, sessions: 0 };
-            pending.in += row.in;
-            pending.out += row.out;
-            pending.sessions += row.sessions;
-            pendingDb.set(key, pending);
+            for (const [month, bytes] of budgetRows) {
+              relayPending.set(month, (relayPending.get(month) || 0) + bytes);
+            }
+            throw error;
           }
-          throw error;
         }
-      }
-      // Drop stale in-memory periods (older than two days).
-      const today = dayKey(now());
-      const yesterday = dayKey(now() - 24 * 60 * 60 * 1000);
-      for (const key of memoryTotals.keys()) {
-        if (key.startsWith("day:") && !key.includes(`:${today}:`) && !key.includes(`:${yesterday}:`)) {
-          memoryTotals.delete(key);
+      } finally {
+        // Enforcement does not depend on the write: over-quota sessions are
+        // closed and the budget is evaluated even when SQLite failed.
+        const today = dayKey(now());
+        const yesterday = dayKey(now() - 24 * 60 * 60 * 1000);
+        for (const key of memoryTotals.keys()) {
+          if (key.startsWith("day:") && !key.includes(`:${today}:`) && !key.includes(`:${yesterday}:`)) {
+            memoryTotals.delete(key);
+          }
         }
-      }
-      for (const session of exceeded) {
-        log?.info("quota exceeded", { owner: session.identity?.owner, sessionId: session.sessionId });
-        onQuotaExceeded?.(session);
+        for (const session of exceeded) {
+          log?.info("quota exceeded", { owner: session.identity?.owner, sessionId: session.sessionId });
+          onQuotaExceeded?.(session);
+        }
+        try {
+          evaluateBudget();
+        } catch (error) {
+          log?.error("budget evaluation failed", { error });
+        }
       }
     })().finally(() => {
       flushing = null;
@@ -243,6 +377,10 @@ function createUsageMeter({
     isOverQuota,
     periodUsage,
     monthly,
+    evaluateBudget,
+    loadBudget,
+    setForced,
+    budgetStatus,
     close() {
       clearInterval(timer);
     },

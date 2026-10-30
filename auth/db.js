@@ -251,6 +251,20 @@ const MIGRATIONS = [
       `);
     },
   },
+  {
+    // Relay-wide monthly egress budget (metering/budget.js): bytes relayed by
+    // every session in a UTC month, and the operator's override, if any.
+    version: 7,
+    async up(db) {
+      await db.exec(`
+        CREATE TABLE relay_egress_monthly (
+          month TEXT PRIMARY KEY,
+          bytes INTEGER NOT NULL DEFAULT 0,
+          forced TEXT CHECK (forced IN ('open', 'paused'))
+        );
+      `);
+    },
+  },
 ];
 
 // All access shares one sqlite3 connection, where a transaction is

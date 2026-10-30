@@ -9,7 +9,7 @@
 const http = require("http");
 const https = require("https");
 const WebSocket = require("ws");
-const { resolveClientIP } = require("./client_ip");
+const { rateKey, resolveClientIP } = require("./client_ip");
 
 const STATUS_TEXT = {
   400: "Bad Request",
@@ -112,6 +112,16 @@ function rejectUpgrade(socket, status, message) {
   socket.destroy();
 }
 
+// WebSocket close reasons are limited to 123 bytes of UTF-8.
+function truncate(text, bytes = 123) {
+  const buffer = Buffer.from(String(text || ""), "utf8");
+  if (buffer.length <= bytes) return String(text || "");
+  let end = bytes;
+  // Step back over continuation bytes so a character is never split.
+  while (end > 0 && (buffer[end] & 0xc0) === 0x80) end -= 1;
+  return buffer.subarray(0, end).toString("utf8");
+}
+
 function readJsonBody(req, { limit = 16 * 1024 } = {}) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -170,6 +180,8 @@ function createPublicServer({
   metrics = null,
   userApi = null,
   authApi = null,
+  budgetStatus = null,
+  poolFull = null,
 }) {
   const allowedOrigins = config.allowedOrigins ? new Set(config.allowedOrigins) : null;
   const sessionOrigins = config.sessionAllowedOrigins ? new Set(config.sessionAllowedOrigins) : null;
@@ -240,6 +252,17 @@ function createPublicServer({
       }
       if (req.headers.origin && !originAllowed(req.headers.origin)) {
         writeJson(res, 403, { error: "origin not allowed" });
+        return;
+      }
+      // Say why before the visitor tries to connect: the budget has paused
+      // the free tiers, or every address is taken.
+      const budget = budgetStatus ? budgetStatus() : null;
+      if (budget && budget.state === "paused") {
+        writeJson(res, 503, { error: "free-tier-paused", pausedUntil: budget.pausedUntil }, corsHeaders(req));
+        return;
+      }
+      if (poolFull && poolFull()) {
+        writeJson(res, 503, { error: "relay-full" }, corsHeaders(req));
         return;
       }
       try {
@@ -322,13 +345,22 @@ function createPublicServer({
         identity = await authenticate(credential ? credential.token : null, { clientIP, req, orgId: extractOrg(req) });
       }
 
+      const clientKey = rateKey(clientIP);
       let admitted = null;
       if (admission) {
-        const verdict = await admission.admit({ identity, clientIP });
+        const verdict = await admission.admit({ identity, clientIP, clientKey });
         if (!verdict.ok) {
           log?.warn("upgrade rejected: admission", { clientIP, owner: identity.owner, reason: verdict.reason });
           metrics?.upgradeRejections?.inc({ status: String(verdict.status) });
-          rejectUpgrade(socket, verdict.status, verdict.reason);
+          // Browsers cannot read the status of a refused upgrade (they see
+          // 1006), so a client speaking relay.v1 gets the handshake and an
+          // immediate close with a code and reason it can show.
+          const offered = parseProtocols(req.headers["sec-websocket-protocol"]).includes(RELAY_PROTOCOL);
+          if (verdict.close && offered) {
+            wss.handleUpgrade(req, socket, head, (ws) => ws.close(verdict.close, truncate(verdict.reason)));
+          } else {
+            rejectUpgrade(socket, verdict.status, verdict.reason);
+          }
           return;
         }
         admitted = verdict;
@@ -339,7 +371,7 @@ function createPublicServer({
       const release = admitted && admitted.release ? admitted.release : null;
       if (release) socket.once("close", release);
       wss.handleUpgrade(req, socket, head, (ws) => {
-        wss.emit("connection", ws, req, { identity, clientIP, release });
+        wss.emit("connection", ws, req, { identity, clientIP, clientKey, release });
       });
     } catch (error) {
       if (error instanceof AuthError || (error && error.status)) {
@@ -387,5 +419,6 @@ module.exports = {
   readJsonBody,
   rejectUpgrade,
   selectProtocol,
+  truncate,
   writeJson,
 };

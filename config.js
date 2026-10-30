@@ -233,6 +233,13 @@ function resolveConfig(env = process.env) {
       name: "USAGE_FLUSH_INTERVAL_MS",
       min: 100,
     }),
+    // Relay-wide monthly egress budget (metering/budget.js), in bytes. Off
+    // unless both thresholds are set. Tier names are checked in hosted.js,
+    // once TIERS_JSON is resolved.
+    budgetThrottleBytes: parseInteger(env.BUDGET_THROTTLE_BYTES, null, { name: "BUDGET_THROTTLE_BYTES", min: 1 }),
+    budgetPauseBytes: parseInteger(env.BUDGET_PAUSE_BYTES, null, { name: "BUDGET_PAUSE_BYTES", min: 1 }),
+    budgetThrottleBps: parseInteger(env.BUDGET_THROTTLE_BPS, 65536, { name: "BUDGET_THROTTLE_BPS", min: 1 }),
+    budgetTiers: parseList(env.BUDGET_TIERS, ["anon"]),
     metricsEnabled: parseBool(env.METRICS_ENABLED, defaults.metricsEnabled),
     metricsToken: env.METRICS_TOKEN || null,
     metricsPublic: parseBool(env.METRICS_PUBLIC, false),
@@ -282,6 +289,13 @@ function resolveConfig(env = process.env) {
 
     warnings,
   };
+
+  if ((config.budgetThrottleBytes === null) !== (config.budgetPauseBytes === null)) {
+    throw new ConfigError("BUDGET_THROTTLE_BYTES and BUDGET_PAUSE_BYTES must be set together");
+  }
+  if (config.budgetThrottleBytes !== null && config.budgetThrottleBytes >= config.budgetPauseBytes) {
+    throw new ConfigError("BUDGET_THROTTLE_BYTES must be less than BUDGET_PAUSE_BYTES");
+  }
 
   if (config.adminPublicPath && !config.adminPublicPath.startsWith("/")) {
     throw new ConfigError("ADMIN_PUBLIC_PATH must start with /");

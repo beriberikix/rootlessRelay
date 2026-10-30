@@ -912,6 +912,23 @@ function createAdminApp({
     });
   }));
 
+  // Relay-wide monthly egress budget (metering/budget.js). The override
+  // ("open" | "paused" | null) wins over the computed state until cleared or
+  // the month rolls over: "paused" stops the free tiers now, "open" reopens
+  // them early (for example after someone used up the budget on purpose).
+  app.get("/api/budget", asyncRoute(async (_req, res) => {
+    res.status(200).json(usage ? usage.budgetStatus() : null);
+  }));
+
+  app.post("/api/budget", asyncRoute(async (req, res) => {
+    const forced = req.body ? req.body.forced : undefined;
+    if (!usage || !["open", "paused", null].includes(forced)) {
+      res.status(400).json({ error: "forced must be open, paused or null" });
+      return;
+    }
+    res.status(200).json(await usage.setForced(forced, req.user.username));
+  }));
+
   // --- inbound rules --------------------------------------------------------
 
   function requireRules(_req, res, next) {

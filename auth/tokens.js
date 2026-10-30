@@ -11,6 +11,7 @@ const jose = require("jose");
 const { AuthError, LOCAL_IDENTITY } = require("../server/public");
 const { roleAllows } = require("./orgs");
 const { parseSessionToken } = require("./user_sessions");
+const { rateKey } = require("../server/client_ip");
 
 const API_TOKEN_PREFIX = "rr_";
 const ANON_ISSUER = "rootlessrelay-anon";
@@ -135,23 +136,10 @@ function createApiTokenStore(db, { now = Date.now, randomBytes = crypto.randomBy
 
 const HOUR_MS = 60 * 60 * 1000;
 
+// Anonymous tokens are bound to the address group (IPv6 by /64), so a
+// phone's rotating privacy address keeps its token.
 function ipHash(ip, secret) {
-  return crypto.createHmac("sha256", secret).update(String(ip)).digest("hex").slice(0, 16);
-}
-
-// The rate-limit key for an address: IPv4 as is, IPv6 by its /64 (one
-// subscriber usually holds a whole /64, so per-address keys are free to
-// rotate).
-function rateKey(ip) {
-  const address = String(ip).split("%")[0];
-  if (!address.includes(":")) return address;
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
-  if (mapped) return mapped[1];
-  const [head, tail] = address.split("::");
-  const front = head ? head.split(":") : [];
-  const back = tail ? tail.split(":") : [];
-  const groups = tail === undefined ? front : [...front, ...Array(Math.max(0, 8 - front.length - back.length)).fill("0"), ...back];
-  return `${groups.slice(0, 4).map((g) => parseInt(g || "0", 16).toString(16)).join(":")}::/64`;
+  return crypto.createHmac("sha256", secret).update(rateKey(ip)).digest("hex").slice(0, 16);
 }
 
 // Anonymous demo tokens: HS256 JWTs bound (optionally) to the requesting IP

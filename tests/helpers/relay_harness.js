@@ -196,6 +196,22 @@ function openWebSocket(port, { token = null, bearer = null, headers = {} } = {})
   });
 }
 
+// Like openWebSocket, but waits for a refusal: an HTTP status, or (for a
+// relay.v1 client refused after authentication) the close code and reason.
+function openAndClose(port, { token = null } = {}) {
+  return new Promise((resolve, reject) => {
+    const protocols = token ? ["relay.v1", `relay.token.${token}`] : ["relay.v1"];
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`, protocols, { perMessageDeflate: false });
+    ws.once("unexpected-response", (_req, res) => {
+      res.resume();
+      resolve({ status: res.statusCode });
+      ws.terminate();
+    });
+    ws.once("close", (code, reason) => resolve({ status: 101, code, reason: reason.toString() }));
+    ws.once("error", reject);
+  });
+}
+
 async function waitForWebSocket(port, child, options = {}) {
   const deadline = Date.now() + 5000;
   let lastError;
@@ -362,6 +378,7 @@ module.exports = {
   httpJson,
   listen,
   macFromNumber,
+  openAndClose,
   openWebSocket,
   parseFrame,
   startRelay,

@@ -82,4 +82,19 @@ function resolveClientIP(req, {
   return validAddress(normalizeAddress(entries[index >= 0 ? index : 0])) || peer;
 }
 
-module.exports = { normalizeAddress, parseProxyRanges, resolveClientIP };
+// The rate-limit key for an address: IPv4 as is, IPv6 by its /64 (one
+// subscriber usually holds a whole /64, so per-address keys are free to
+// rotate).
+function rateKey(ip) {
+  const address = String(ip).split("%")[0];
+  if (!address.includes(":")) return address;
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
+  if (mapped) return mapped[1];
+  const [head, tail] = address.split("::");
+  const front = head ? head.split(":") : [];
+  const back = tail ? tail.split(":") : [];
+  const groups = tail === undefined ? front : [...front, ...Array(Math.max(0, 8 - front.length - back.length)).fill("0"), ...back];
+  return `${groups.slice(0, 4).map((g) => parseInt(g || "0", 16).toString(16)).join(":")}::/64`;
+}
+
+module.exports = { normalizeAddress, parseProxyRanges, rateKey, resolveClientIP };

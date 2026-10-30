@@ -223,10 +223,23 @@ sent as a subprotocol entry next to `relay.v1`; the server answers with
 const ws = new WebSocket("wss://relay.example.com", ["relay.v1", `relay.token.${token}`]);
 ```
 
-Non-browser clients may send `Authorization: Bearer <token>` instead. Rejected
-upgrades return a plain HTTP status before the handshake: 401 (no or invalid
-credential), 403 (banned account, origin not allowed), 429 (per-address,
-per-account or quota limit), 503 (address pool exhausted or shutting down).
+Non-browser clients may send `Authorization: Bearer <token>` instead.
+
+Refusals before authentication return a plain HTTP status before the
+handshake: 401 (no or invalid credential), 403 (banned account, origin not
+allowed), 503 (shutting down). Browsers report these only as close code 1006.
+
+Refusals after authentication complete the handshake and close at once with a
+code and reason the client can read, when it offered `relay.v1` (otherwise
+they keep the HTTP status in brackets):
+
+| Close code | Reason | Meaning |
+| --- | --- | --- |
+| 1008 | `free tier paused until YYYY-MM-DD` | The monthly egress budget is used up (see below); don't retry before that date. (503) |
+| 1013 | `connection limit reached for this address` | Too many sessions from this address (IPv6: this /64); try later. (429) |
+| 1013 | `session limit reached for this account` | Too many sessions for this account or token; try later. (429) |
+| 1013 | `relay full` | Every pool address is in use; try later. (503) |
+| 1008 | `quota exceeded` | The account's (or address's) quota is used up; don't retry. (429) |
 
 Tokens come from one of three places:
 
@@ -236,7 +249,11 @@ Tokens come from one of three places:
 - **Anonymous demo tokens**: `POST /api/anon/token` on the public port returns
   a short-lived token bound to the caller's address, limited to
   `ANON_TOKENS_PER_IP_PER_HOUR` (per /64 for IPv6). If `TURNSTILE_SECRET` is set, the request
-  body must carry a valid Cloudflare Turnstile `turnstileToken`.
+  body must carry a valid Cloudflare Turnstile `turnstileToken`. It answers
+  `503 {"error": "free-tier-paused", "pausedUntil": "YYYY-MM-DD"}` while the
+  budget has paused the anonymous tier, and `503 {"error": "relay-full"}`
+  while every pool address is in use, so a page can say why before
+  connecting.
 - **External OIDC JWTs**: set `JWT_ISSUER`, `JWT_AUDIENCE` and `JWT_JWKS_URL`.
   Tokens are verified against the provider's JWKS and an account is created on
   first sight (`JWT_USERNAME_CLAIM`, `JWT_DEFAULT_TIER`).
@@ -268,6 +285,33 @@ Override any field with `TIERS_JSON`, for example
 `TIERS_JSON='{"user":{"quotaBytes":53687091200},"anon":{"maxSessionMs":600000}}'`.
 `null` means unlimited. Operators can move an account to another tier from the
 admin panel.
+
+### Monthly egress budget
+
+A relay-wide cap on what free traffic can cost. Every byte any session
+relays (all tiers) counts toward one total for the UTC calendar month, stored
+in the database (`relay_egress_monthly`), so restarts do not reset it. Only the
+tiers in `BUDGET_TIERS` are affected:
+
+- **Throttle** (`BUDGET_THROTTLE_BYTES`): sessions in those tiers that start
+  from now on get at most `BUDGET_THROTTLE_BPS` each way. Open sessions keep
+  their rate.
+- **Pause** (`BUDGET_PAUSE_BYTES`): open sessions in those tiers close with
+  `1008 "free tier paused until <first day of next month>"`, and new ones are
+  refused until the month resets. Other tiers are never slowed or closed.
+
+The state is checked after every usage flush (also when the database write
+failed) and at every admission. Off unless both thresholds are set.
+
+Operators can override it with `POST /api/budget {"forced": "paused" | "open" | null}`
+on the admin port: `paused` stops the budget tiers now, `open` reopens them
+(for example after someone used up the budget on purpose), `null` returns to
+the computed state. The override is stored and holds until cleared or the
+month rolls over. `GET /api/budget` returns the month, bytes, thresholds,
+state and override. Metrics: `rootlessrelay_budget_bytes`,
+`rootlessrelay_budget_threshold_bytes{threshold}`,
+`rootlessrelay_budget_state{state}`, `rootlessrelay_budget_forced{state}`.
+`GET /api/auth/config` on the public port includes `budget` and `pausedUntil`.
 
 ### Operator panel and API
 
@@ -392,6 +436,9 @@ pending account directly.
 | `SHUTDOWN_TIMEOUT_MS`, `SHUTDOWN_HARD_EXIT_MS` | Flush budget and hard exit after SIGTERM. | `500`, `800` | same |
 | `AUDIT_ENABLED`, `AUDIT_RETENTION_DAYS` | Connection audit log and its retention. | `false`, `30` | `true`, `30` |
 | `USAGE_FLUSH_INTERVAL_MS` | How often byte counters are persisted. | `30000` | same |
+| `BUDGET_THROTTLE_BYTES`, `BUDGET_PAUSE_BYTES` | Monthly egress budget thresholds, in bytes (integers; set both or neither, throttle below pause). | unset (off) | unset (off) |
+| `BUDGET_THROTTLE_BPS` | Rate, each way, for budget-tier sessions started while throttled. | `65536` | same |
+| `BUDGET_TIERS` | Comma-separated tiers the budget throttles and pauses; each must exist. | `anon` | `anon` |
 | `METRICS_ENABLED`, `METRICS_TOKEN`, `METRICS_PUBLIC` | Prometheus endpoint, an optional scrape token, and whether to serve it without auth. | `false` | `true`, unset, `false` |
 | `METRICS_MERGE_URLS` | Comma-separated local metrics endpoints appended to `/metrics`; families the relay already exports and unreachable URLs are skipped. | unset | unset |
 | `LOG_JSON` | JSON-lines logs for the hosted modules. | `false` | `true` |

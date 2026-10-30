@@ -53,6 +53,10 @@ function createMetrics({
       authFailures: noopInstrument(),
       anonTokensIssued: noopInstrument(),
       upgradeRejections: noopInstrument(),
+      budgetBytes: noopInstrument(),
+      budgetThresholdBytes: noopInstrument(),
+      budgetState: noopInstrument(),
+      budgetForced: noopInstrument(),
     };
   }
 
@@ -105,6 +109,30 @@ function createMetrics({
     labelNames: ["status"],
     registers: [registry],
   });
+  // Relay-wide monthly egress budget (metering/budget.js).
+  const budgetBytes = new client.Gauge({
+    name: "rootlessrelay_budget_bytes",
+    help: "Bytes relayed this UTC month, all tiers",
+    registers: [registry],
+  });
+  const budgetThresholdBytes = new client.Gauge({
+    name: "rootlessrelay_budget_threshold_bytes",
+    help: "Budget thresholds in bytes",
+    labelNames: ["threshold"],
+    registers: [registry],
+  });
+  const budgetState = new client.Gauge({
+    name: "rootlessrelay_budget_state",
+    help: "1 for the budget's current state (open, throttled, paused), else 0",
+    labelNames: ["state"],
+    registers: [registry],
+  });
+  const budgetForced = new client.Gauge({
+    name: "rootlessrelay_budget_forced",
+    help: "1 when an operator has forced the budget to this state, else 0",
+    labelNames: ["state"],
+    registers: [registry],
+  });
 
   return {
     enabled: true,
@@ -124,6 +152,10 @@ function createMetrics({
     authFailures,
     anonTokensIssued,
     upgradeRejections,
+    budgetBytes,
+    budgetThresholdBytes,
+    budgetState,
+    budgetForced,
   };
 }
 

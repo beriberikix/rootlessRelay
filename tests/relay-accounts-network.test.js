@@ -19,7 +19,7 @@ test("off by default: config says so and the routes answer 404", NETWORK, async 
   try {
     const config = await httpJson(relay.wsPort, { path: "/api/auth/config" });
     assert.equal(config.status, 200);
-    assert.deepEqual(config.body, { passwordLogin: false, signup: null, oidc: null });
+    assert.deepEqual(config.body, { passwordLogin: false, signup: null, oidc: null, budget: "open", pausedUntil: null });
     assert.equal((await login(relay, ADMIN_USER, ADMIN_PASSWORD)).status, 404);
   } finally {
     await relay.close();
@@ -36,7 +36,7 @@ test("password sign-in: session token works on the API and the WebSocket until s
     assert.equal(created.status, 201, created.text);
 
     assert.deepEqual((await httpJson(relay.wsPort, { path: "/api/auth/config" })).body,
-      { passwordLogin: true, signup: null, oidc: null });
+      { passwordLogin: true, signup: null, oidc: null, budget: "open", pausedUntil: null });
     assert.equal((await login(relay, "alice", "wrong-password")).status, 401);
     assert.equal((await login(relay, "nobody", "whatever-password")).status, 401);
 

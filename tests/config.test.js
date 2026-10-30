@@ -142,3 +142,25 @@ test("SIGNUP_MODE defaults to open and accepts only open or invite", () => {
   assert.equal(resolveConfig({ SIGNUP_MODE: "invite" }).signupMode, "invite");
   assert.throws(() => resolveConfig({ SIGNUP_MODE: "closed" }), ConfigError);
 });
+
+test("budget: off by default, both thresholds together, throttle below pause, integers only", () => {
+  const off = resolveConfig(HOSTED_MIN);
+  assert.deepEqual(
+    [off.budgetThrottleBytes, off.budgetPauseBytes, off.budgetThrottleBps, off.budgetTiers],
+    [null, null, 65536, ["anon"]],
+  );
+  const on = resolveConfig({
+    ...HOSTED_MIN,
+    BUDGET_THROTTLE_BYTES: "300000000000",
+    BUDGET_PAUSE_BYTES: "840000000000",
+    BUDGET_THROTTLE_BPS: "32768",
+    BUDGET_TIERS: "free, anon",
+  });
+  assert.deepEqual(
+    [on.budgetThrottleBytes, on.budgetPauseBytes, on.budgetThrottleBps, on.budgetTiers],
+    [300000000000, 840000000000, 32768, ["free", "anon"]],
+  );
+  assert.throws(() => resolveConfig({ ...HOSTED_MIN, BUDGET_THROTTLE_BYTES: "100" }), /set together/);
+  assert.throws(() => resolveConfig({ ...HOSTED_MIN, BUDGET_THROTTLE_BYTES: "200", BUDGET_PAUSE_BYTES: "100" }), /less than/);
+  assert.throws(() => resolveConfig({ ...HOSTED_MIN, BUDGET_THROTTLE_BYTES: "300GB", BUDGET_PAUSE_BYTES: "840GB" }), ConfigError);
+});
